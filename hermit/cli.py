@@ -13,6 +13,8 @@ Usage:
     hermit collection status <name>       # collection indexing status
     hermit collection sync <name>         # trigger sync
     hermit collection tasks <name>        # indexing task status
+    hermit install-skills                 # install skills to ~/.agents/skills/
+    hermit install-skills --uninstall     # remove installed skills
 
 All commands output JSON to stdout. Use --pretty for indented output.
 Errors: {"error": "message"} with non-zero exit code.
@@ -303,6 +305,73 @@ def cmd_collection_tasks(args):
     _output(result)
 
 
+# ── Skill distribution ──────────────────────────────────────────
+
+
+def _find_skills_dir() -> "Path | None":
+    """Locate the skills source directory.
+
+    Priority:
+    1. Package-internal: hermit/_skills/ (installed mode)
+    2. Repository: .agents/skills/ relative to project root (dev mode)
+    """
+    from pathlib import Path
+
+    # 1. Package-internal (_skills/ injected by hatchling force-include)
+    pkg_skills = Path(__file__).parent / "_skills"
+    if pkg_skills.is_dir():
+        return pkg_skills
+
+    # 2. Dev mode: walk up from hermit/ to repo root, look for .agents/skills/
+    repo_root = Path(__file__).parent.parent
+    dev_skills = repo_root / ".agents" / "skills"
+    if dev_skills.is_dir():
+        return dev_skills
+
+    return None
+
+
+def cmd_install_skills(args):
+    import shutil
+    from pathlib import Path
+
+    skills_src = _find_skills_dir()
+    if skills_src is None:
+        _error("no skills directory found")
+
+    global_dir = Path.home() / ".agents" / "skills"
+    # Collect skill names from source
+    skill_names = [d.name for d in skills_src.iterdir() if d.is_dir() and (d / "SKILL.md").exists()]
+
+    if not skill_names:
+        _error("no skills found in source directory")
+
+    if args.uninstall:
+        removed = []
+        for name in skill_names:
+            target = global_dir / name
+            if target.exists():
+                shutil.rmtree(target)
+                removed.append(name)
+        _output({"status": "uninstalled", "skills": removed})
+
+    # Install
+    global_dir.mkdir(parents=True, exist_ok=True)
+    installed = []
+    for name in skill_names:
+        src = skills_src / name
+        dst = global_dir / name
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        # Write origin marker for version tracking
+        origin = dst / ".origin"
+        origin.write_text(json.dumps({"package": "hermit", "version": "0.1.0"}))
+        installed.append(name)
+
+    _output({"status": "installed", "skills": installed, "target": str(global_dir)})
+
+
 # ── Argument parser ─────────────────────────────────────────────
 
 
@@ -362,6 +431,10 @@ def main():
     col_tasks = col_sub.add_parser("tasks", help="Indexing task status")
     col_tasks.add_argument("name", help="Collection name")
 
+    # Skill distribution
+    sk = sub.add_parser("install-skills", help="Install agent skills to ~/.agents/skills/")
+    sk.add_argument("--uninstall", action="store_true", help="Remove installed skills")
+
     args = parser.parse_args()
 
     global _pretty
@@ -397,6 +470,8 @@ def main():
             cmd_collection_tasks(args)
         else:
             col.print_help()
+    elif args.command == "install-skills":
+        cmd_install_skills(args)
     else:
         parser.print_help()
 
