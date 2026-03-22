@@ -54,6 +54,7 @@ def _index_file(
     collection_name: str,
     file_path: Path,
     meta: MetadataStore,
+    file_hash: str | None = None,
 ) -> bool:
     """Read, chunk, embed, and upsert a single file. Returns True on success."""
     fpath_str = str(file_path)
@@ -66,18 +67,6 @@ def _index_file(
 
     chunks = chunk_text(text)
     if not chunks:
-        return False
-
-    # Delete old entries (safe even if none exist)
-    try:
-        qdrant.delete_by_source_file(collection_name, fpath_str)
-    except CollectionCorruptedError:
-        logger.warning(
-            "Collection '%s' was recreated due to data corruption; "
-            "clearing metadata so all files are re-indexed on next scan",
-            collection_name,
-        )
-        meta.destroy()
         return False
 
     # Prepend document title to each chunk for embedding
@@ -99,9 +88,21 @@ def _index_file(
         for i, chunk in enumerate(chunks)
     ]
 
-    qdrant.upsert_chunks(collection_name, ids, dense_vectors, sparse_vectors, payloads)
+    # Delete old + upsert new in a single lock acquisition
+    try:
+        qdrant.replace_file_chunks(
+            collection_name, fpath_str, ids, dense_vectors, sparse_vectors, payloads
+        )
+    except CollectionCorruptedError:
+        logger.warning(
+            "Collection '%s' was recreated due to data corruption; "
+            "clearing metadata so all files are re-indexed on next scan",
+            collection_name,
+        )
+        meta.destroy()
+        return False
 
-    fhash = _file_hash(file_path)
+    fhash = file_hash or _file_hash(file_path)
     fmtime = file_path.stat().st_mtime
     meta.upsert(fpath_str, fhash, fmtime, len(chunks))
 
@@ -166,17 +167,26 @@ def scan_folder(
             if _index_file(collection_name, Path(fpath_str), meta):
                 added += 1
 
-    # --- Handle existing: check hash for changes ---
+    # --- Handle existing: check mtime first, then hash for changes ---
     for fpath_str in sorted(to_check):
-        old_hash, _ = indexed[fpath_str]
+        old_hash, old_mtime = indexed[fpath_str]
+        try:
+            current_mtime = Path(fpath_str).stat().st_mtime
+        except OSError:
+            continue
+        if current_mtime == old_mtime:
+            continue  # mtime unchanged — skip expensive hash
         current_hash = _file_hash(Path(fpath_str))
         if current_hash == old_hash:
+            # Content identical despite mtime change — update mtime in metadata
+            meta.upsert(fpath_str, old_hash, current_mtime,
+                        meta.get_chunk_count(fpath_str))
             continue
         if defer_indexing:
-            if enqueue_index_task(collection_name, fpath_str):
+            if enqueue_index_task(collection_name, fpath_str, file_hash=current_hash):
                 updated += 1
         else:
-            if _index_file(collection_name, Path(fpath_str), meta):
+            if _index_file(collection_name, Path(fpath_str), meta, file_hash=current_hash):
                 updated += 1
 
     return {"added": added, "updated": updated, "deleted": deleted}
