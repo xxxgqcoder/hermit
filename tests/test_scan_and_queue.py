@@ -276,15 +276,19 @@ def test_task_queue_dedup():
     """Duplicate tasks for same (collection, file) should be rejected."""
     from hermit.ingestion.task_queue import IndexTask, _IndexTaskQueue
 
-    q = _IndexTaskQueue()
-    # Don't start worker — just test enqueue dedup logic
-    q._worker = threading.Thread()  # fake alive check
-    q._worker.start = lambda: None
+    q = _IndexTaskQueue(num_workers=1)
+    # Use a real daemon thread that blocks forever so is_alive() returns True
+    barrier = threading.Event()
+    t = threading.Thread(target=barrier.wait, daemon=True)
+    t.start()
+    q._workers = [t]
 
     task = IndexTask("col", "/tmp/a.md")
     # Manually add to pending to simulate enqueue without worker
     q._pending.add((task.collection_name, task.file_path))
     assert q.enqueue(task) is False  # should reject duplicate
+
+    barrier.set()  # let the thread exit
 
 
 def test_task_queue_status():

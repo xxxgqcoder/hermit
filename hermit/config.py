@@ -42,6 +42,9 @@ MAX_COLLECTIONS = 4
 MAX_COLLECTION_NAME_LENGTH = 64
 COLLECTION_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 
+# Indexing concurrency
+INDEX_WORKERS = int(os.environ.get("HERMIT_INDEX_WORKERS", 4))
+
 # FastAPI
 HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
