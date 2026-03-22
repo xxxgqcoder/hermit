@@ -363,6 +363,10 @@ def _find_skills_dir() -> "Path | None":
     return None
 
 
+# Project name used as namespace prefix for global skill installation
+_PROJECT_NAME = "hermit"
+
+
 def cmd_install_skills(args):
     import shutil
     from pathlib import Path
@@ -371,7 +375,8 @@ def cmd_install_skills(args):
     if skills_src is None:
         _error("no skills directory found")
 
-    global_dir = Path.home() / ".agents" / "skills"
+    # Install under ~/.agents/skills/{project}/{skill} to avoid namespace conflicts
+    project_dir = Path.home() / ".agents" / "skills" / _PROJECT_NAME
     # Collect skill names from source
     skill_names = [d.name for d in skills_src.iterdir() if d.is_dir() and (d / "SKILL.md").exists()]
 
@@ -381,27 +386,30 @@ def cmd_install_skills(args):
     if args.uninstall:
         removed = []
         for name in skill_names:
-            target = global_dir / name
+            target = project_dir / name
             if target.exists():
                 shutil.rmtree(target)
                 removed.append(name)
+        # Remove project namespace dir if empty after uninstall
+        if project_dir.exists() and not any(project_dir.iterdir()):
+            project_dir.rmdir()
         _output({"status": "uninstalled", "skills": removed})
 
     # Install
-    global_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
     installed = []
     for name in skill_names:
         src = skills_src / name
-        dst = global_dir / name
+        dst = project_dir / name
         if dst.exists():
             shutil.rmtree(dst)
         shutil.copytree(src, dst)
         # Write origin marker for version tracking
         origin = dst / ".origin"
-        origin.write_text(json.dumps({"package": "hermit", "version": "0.1.0"}))
+        origin.write_text(json.dumps({"package": _PROJECT_NAME, "version": "0.1.0"}))
         installed.append(name)
 
-    _output({"status": "installed", "skills": installed, "target": str(global_dir)})
+    _output({"status": "installed", "skills": installed, "target": str(project_dir)})
 
 
 # ── Argument parser ─────────────────────────────────────────────
