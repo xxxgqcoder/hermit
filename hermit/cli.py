@@ -23,7 +23,6 @@ import json
 import logging
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -39,7 +38,9 @@ from hermit.config import (
     HOST,
     LOG_DIR,
     PID_FILE,
-    PORT,
+    load_port,
+    resolve_port,
+    save_port,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def _api_request(method: str, path: str, body: dict | None = None) -> dict:
 
     Raises SystemExit with JSON error on failure.
     """
-    url = f"http://127.0.0.1:{PORT}{path}"
+    url = f"http://127.0.0.1:{load_port()}{path}"
     data = json.dumps(body).encode() if body else None
     headers = {"Content-Type": "application/json"} if body else {}
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -109,21 +110,16 @@ def _read_pid() -> int | None:
         return None
 
 
-def _is_port_in_use(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(("127.0.0.1", port)) == 0
-
-
 # ── Server commands ─────────────────────────────────────────────
 
 
 def cmd_start(_args):
     pid = _read_pid()
     if pid is not None:
-        _output({"status": "already_running", "pid": pid, "port": PORT})
+        _output({"status": "already_running", "pid": pid, "port": load_port()})
 
-    if _is_port_in_use(PORT):
-        _error(f"port {PORT} is already in use")
+    port = resolve_port()
+    save_port(port)
 
     # Ensure directories exist
     HERMIT_HOME.mkdir(parents=True, exist_ok=True)
@@ -138,7 +134,7 @@ def cmd_start(_args):
                 sys.executable, "-m", "uvicorn",
                 "hermit.app:app",
                 "--host", HOST,
-                "--port", str(PORT),
+                "--port", str(port),
             ],
             stdout=lf,
             stderr=subprocess.STDOUT,
@@ -158,7 +154,7 @@ def cmd_start(_args):
             _error(f"server process exited unexpectedly, check {log_file}")
 
         try:
-            url = f"http://127.0.0.1:{PORT}/health"
+            url = f"http://127.0.0.1:{port}/health"
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=3) as resp:
                 health = json.loads(resp.read())
@@ -166,9 +162,9 @@ def cmd_start(_args):
             continue
 
         if health.get("status") == "ready":
-            _output({"status": "started", "pid": proc.pid, "port": PORT})
+            _output({"status": "started", "pid": proc.pid, "port": port})
 
-    _output({"status": "starting", "pid": proc.pid, "port": PORT,
+    _output({"status": "starting", "pid": proc.pid, "port": port,
              "warning": "health check timed out, server may still be loading models"})
 
 
@@ -202,8 +198,9 @@ def cmd_status(_args):
     if pid is None:
         _output({"status": "stopped"})
 
+    port = load_port()
     try:
-        url = f"http://127.0.0.1:{PORT}/health"
+        url = f"http://127.0.0.1:{port}/health"
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=3) as resp:
             health = json.loads(resp.read())

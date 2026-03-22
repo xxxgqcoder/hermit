@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from pathlib import Path
@@ -43,4 +44,43 @@ COLLECTION_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 
 # FastAPI
 HOST = "0.0.0.0"
-PORT = 8000
+DEFAULT_PORT = 8000
+PORT_FILE = HERMIT_HOME / "port.json"
+
+
+def load_port() -> int:
+    """Read persisted port from PORT_FILE; fall back to DEFAULT_PORT."""
+    if PORT_FILE.exists():
+        try:
+            data = json.loads(PORT_FILE.read_text())
+            return int(data["port"])
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            pass
+    return DEFAULT_PORT
+
+
+def save_port(port: int) -> None:
+    """Persist *port* to PORT_FILE."""
+    PORT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PORT_FILE.write_text(json.dumps({"port": port}))
+
+
+def resolve_port() -> int:
+    """Return a usable port: try the persisted port, then DEFAULT_PORT, then ask the OS."""
+    import socket as _sock
+
+    def _available(p: int) -> bool:
+        with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+            return s.connect_ex(("127.0.0.1", p)) != 0
+
+    candidate = load_port()
+    if _available(candidate):
+        return candidate
+
+    if candidate != DEFAULT_PORT and _available(DEFAULT_PORT):
+        return DEFAULT_PORT
+
+    # Let the OS pick a free port
+    with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
