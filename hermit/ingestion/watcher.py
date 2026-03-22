@@ -41,6 +41,7 @@ class _Handler(FileSystemEventHandler):
                 self.folder_path,
                 chunk_size=self.chunk_size,
                 chunk_overlap=self.chunk_overlap,
+                defer_indexing=True,
             )
             logger.info("Watcher rescan done: %s", stats)
         except Exception:

@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 
 from hermit.api.schemas import (
     CollectionStatus,
+    CollectionTaskStatus,
     CreateCollectionRequest,
     SearchRequest,
     SearchResponse,
@@ -10,10 +11,12 @@ from hermit.api.schemas import (
     SyncResponse,
 )
 from hermit.ingestion.scanner import scan_folder
+from hermit.ingestion.task_queue import get_collection_task_status
 from hermit.ingestion.watcher import start_watching, stop_watching
 from hermit.retrieval.searcher import search
 from hermit.storage.metadata import MetadataStore
 from hermit.storage.qdrant import delete_collection, ensure_collection
+from hermit.storage import registry
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +47,22 @@ def create_collection(req: CreateCollectionRequest):
         raise HTTPException(status_code=409, detail=f"Collection '{req.name}' already exists")
 
     ensure_collection(req.name)
-    stats = scan_folder(req.name, req.folder_path, req.chunk_size, req.chunk_overlap)
+    stats = scan_folder(
+        req.name,
+        req.folder_path,
+        req.chunk_size,
+        req.chunk_overlap,
+        defer_indexing=True,
+    )
     start_watching(req.name, req.folder_path, req.chunk_size, req.chunk_overlap)
 
-    _collections[req.name] = {
+    cfg = {
         "folder_path": req.folder_path,
         "chunk_size": req.chunk_size,
         "chunk_overlap": req.chunk_overlap,
     }
+    _collections[req.name] = cfg
+    registry.register(req.name, req.folder_path, req.chunk_size, req.chunk_overlap)
     return SyncResponse(**stats)
 
 
@@ -63,6 +74,7 @@ def remove_collection(name: str):
     delete_collection(name)
     MetadataStore(name).destroy()
     _collections.pop(name, None)
+    registry.unregister(name)
     return {"detail": f"Collection '{name}' deleted"}
 
 
@@ -71,7 +83,13 @@ def sync_collection(name: str):
     if name not in _collections:
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
     cfg = _collections[name]
-    stats = scan_folder(name, cfg["folder_path"], cfg["chunk_size"], cfg["chunk_overlap"])
+    stats = scan_folder(
+        name,
+        cfg["folder_path"],
+        cfg["chunk_size"],
+        cfg["chunk_overlap"],
+        defer_indexing=True,
+    )
     return SyncResponse(**stats)
 
 
@@ -88,3 +106,10 @@ def collection_status(name: str):
         watching=True,
         **status,
     )
+
+
+@router.get("/collections/{name}/tasks", response_model=CollectionTaskStatus)
+def collection_tasks_status(name: str):
+    if name not in _collections:
+        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+    return CollectionTaskStatus(**get_collection_task_status(name))

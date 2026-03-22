@@ -46,6 +46,14 @@ class CollectionStatus(BaseModel):
     watching: bool
 
 
+class CollectionTaskStatus(BaseModel):
+    collection: str
+    pending_tasks: int
+    queued_tasks: int
+    in_progress_tasks: int
+    worker_alive: bool
+
+
 class SyncResponse(BaseModel):
     added: int
     updated: int

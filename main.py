@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from hermit.api.routes import router
 from hermit.config import HOST, PORT
+from hermit.ingestion.task_queue import start_task_worker
 from hermit.retrieval import embedder, reranker
 
 logging.basicConfig(
@@ -20,6 +21,30 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Hermit — loading models...")
     embedder.warmup()
     reranker.warmup()
+    start_task_worker()
+
+    # Reload persisted collections and run startup scan
+    from hermit.storage.registry import get_all
+    from hermit.ingestion.scanner import scan_folder
+    from hermit.ingestion.watcher import start_watching
+    from hermit.api.routes import _collections
+
+    for name, cfg in get_all().items():
+        logger.info("Restoring collection '%s' from %s", name, cfg["folder_path"])
+        try:
+            stats = scan_folder(
+                name,
+                cfg["folder_path"],
+                chunk_size=cfg.get("chunk_size", 512),
+                chunk_overlap=cfg.get("chunk_overlap", 64),
+                defer_indexing=True,
+            )
+            logger.info("Startup scan for '%s': %s", name, stats)
+            start_watching(name, cfg["folder_path"], cfg.get("chunk_size", 512), cfg.get("chunk_overlap", 64))
+            _collections[name] = cfg
+        except Exception:
+            logger.exception("Failed to restore collection '%s'", name)
+
     logger.info("Hermit ready.")
     yield
     logger.info("Shutting down Hermit.")
