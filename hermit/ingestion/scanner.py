@@ -146,3 +146,22 @@ def scan_folder(
                 updated += 1
 
     return {"added": added, "updated": updated, "deleted": deleted}
+
+
+def rebuild_collection(
+    collection_name: str,
+    folder_path: str,
+    chunk_size: int = 512,
+    chunk_overlap: int = 64,
+):
+    """Drop and recreate a collection, then re-index all files via task queue."""
+    logger.info("Rebuilding index for collection '%s'...", collection_name)
+    qdrant.delete_collection(collection_name)
+    MetadataStore(collection_name).destroy()
+    return scan_folder(
+        collection_name,
+        folder_path,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        defer_indexing=True,
+    )

@@ -23,27 +23,54 @@ async def lifespan(app: FastAPI):
     reranker.warmup()
     start_task_worker()
 
+    # Check if embedding models changed since last run
+    from hermit.storage.model_signature import check_model_changed, save_signature
+    model_changed, old_sig, new_sig = check_model_changed()
+    if model_changed:
+        logger.warning(
+            "Embedding model change detected! Old: %s, New: %s. "
+            "All collections will be re-indexed in background.",
+            old_sig, new_sig,
+        )
+
     # Reload persisted collections and run startup scan
     from hermit.storage.registry import get_all
-    from hermit.ingestion.scanner import scan_folder
+    from hermit.ingestion.scanner import scan_folder, rebuild_collection
     from hermit.ingestion.watcher import start_watching
     from hermit.api.routes import _collections
 
     for name, cfg in get_all().items():
         logger.info("Restoring collection '%s' from %s", name, cfg["folder_path"])
         try:
-            stats = scan_folder(
-                name,
-                cfg["folder_path"],
-                chunk_size=cfg.get("chunk_size", 512),
-                chunk_overlap=cfg.get("chunk_overlap", 64),
-                defer_indexing=True,
-            )
-            logger.info("Startup scan for '%s': %s", name, stats)
+            if model_changed:
+                logger.warning(
+                    "Queuing full re-index for collection '%s' due to model change.", name
+                )
+                rebuild_collection(
+                    name,
+                    cfg["folder_path"],
+                    chunk_size=cfg.get("chunk_size", 512),
+                    chunk_overlap=cfg.get("chunk_overlap", 64),
+                )
+            else:
+                stats = scan_folder(
+                    name,
+                    cfg["folder_path"],
+                    chunk_size=cfg.get("chunk_size", 512),
+                    chunk_overlap=cfg.get("chunk_overlap", 64),
+                    defer_indexing=True,
+                )
+                logger.info("Startup scan for '%s': %s", name, stats)
+
             start_watching(name, cfg["folder_path"], cfg.get("chunk_size", 512), cfg.get("chunk_overlap", 64))
             _collections[name] = cfg
         except Exception:
             logger.exception("Failed to restore collection '%s'", name)
+
+    # Save current model signature after successful startup
+    if model_changed:
+        save_signature()
+        logger.info("Model signature updated.")
 
     logger.info("Hermit ready.")
     yield
