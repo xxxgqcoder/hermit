@@ -13,7 +13,6 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "qdrant-client>=1.13",
     "fastembed>=0.6",
-    "watchdog>=6",
     "huggingface_hub>=0.20",
 ]
 

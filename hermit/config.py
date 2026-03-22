@@ -45,6 +45,10 @@ COLLECTION_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 # Indexing concurrency
 INDEX_WORKERS = int(os.environ.get("HERMIT_INDEX_WORKERS", 4))
 
+# Polling interval for knowledge base file change detection (seconds)
+# Default: 900s (15 minutes). Override with HERMIT_POLL_INTERVAL env var.
+POLL_INTERVAL_SECONDS = int(os.environ.get("HERMIT_POLL_INTERVAL", 900))
+
 # FastAPI
 HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
