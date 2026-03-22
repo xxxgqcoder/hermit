@@ -1,122 +1,126 @@
 # Hermit
 
-Hermit 是一个**本地运行、开箱即用的语义检索服务**，适合把一组文档目录注册成知识库，然后通过 HTTP API 或命令行进行管理与搜索。
+[中文说明 / Chinese version](./README_cn.md)
 
-它的核心特点是：
+Hermit is a **self-contained local semantic search service** for turning one or more document folders into searchable knowledge-base collections.
 
-- **完全本地运行**：模型、向量库、元数据都保存在项目目录中
-- **多知识库支持**：一个目录对应一个 collection
-- **混合检索**：Dense + Sparse 双路召回
-- **精排**：使用 reranker 对候选结果再次排序
-- **自动增量同步**：启动时扫描，运行时监听文件变更
-- **无 GPU 依赖**：基于 `fastembed` + ONNX Runtime，默认 CPU 运行
+It is designed for local-first workflows and works well as a lightweight retrieval backend for notes, technical documents, and small RAG-style applications.
 
-## 适合用来做什么
+## Highlights
 
-Hermit 适合这类场景：
+- **Runs fully locally**: models, vector data, and metadata live inside the project
+- **Multi-collection support**: one folder maps to one collection
+- **Hybrid retrieval**: dense + sparse recall
+- **Reranking**: a cross-encoder reranks the fused candidates
+- **Incremental sync**: startup scan plus filesystem watching
+- **CPU-friendly**: built on `fastembed` + ONNX Runtime, no GPU required
 
-- 给个人笔记、技术文档、题解目录做本地语义搜索
-- 为本地工具或 Agent 提供一个轻量的检索后端
-- 在不依赖云服务的前提下快速搭建 RAG 检索层
+## What it is good for
 
-当前实现会把知识库目录中的文件统一按文本读取（`UTF-8`，失败时容错替换），因此特别适合已经整理成 `.md`、`.txt` 等纯文本内容的资料目录。
+Hermit is a good fit when you want to:
 
-## 核心能力
+- search a local notes or markdown repository semantically
+- expose a simple retrieval API for a local tool or agent
+- build a private, small-footprint RAG layer without cloud dependencies
 
-### 检索链路
+The current implementation reads files as text using `UTF-8` with replacement on decode errors, so it works best with plain-text sources such as `.md` and `.txt` files.
 
-Hermit 采用以下检索流程：
+## How it works
 
-1. Query 同时生成 dense / sparse 表示
-2. Qdrant 执行混合召回
-3. 使用 RRF 融合候选结果
-4. reranker 对候选结果重新排序
-5. 返回 Top-K chunk 结果
+### Retrieval pipeline
 
-### 索引链路
+Hermit uses the following search flow:
 
-每个知识库目录都会经过：
+1. Encode the query into dense and sparse representations
+2. Run hybrid retrieval in Qdrant
+3. Fuse candidates with RRF
+4. Rerank the candidate set
+5. Return the top matching chunks
 
-1. 启动扫描
-2. SQLite 元数据比对（增、删、改）
-3. 文本分块
-4. 向量化
-5. 写入 Qdrant
-6. watchdog 持续监听目录变更
+### Indexing pipeline
 
-### 默认参数
+Each registered folder goes through:
+
+1. startup scan
+2. SQLite metadata diffing
+3. text chunking
+4. embedding generation
+5. Qdrant upsert
+6. ongoing filesystem watching
+
+### Default settings
 
 - Chunk size: `512`
 - Chunk overlap: `64`
-- Search top_k: `5`
-- Dense weight 参数默认值: `0.7`
-- Sparse weight 参数默认值: `0.3`
-- Rerank candidate 数量: `30`
-- 最大 collection 数量: `4`
-- Collection 名称最大长度: `64`
-- 默认服务端口: `8000`
+- Search `top_k`: `5`
+- Default `w_dense`: `0.7`
+- Default `w_sparse`: `0.3`
+- Default rerank candidates: `30`
+- Max collections: `4`
+- Max collection name length: `64`
+- Default port: `8000`
 
-## 技术栈
+## Tech stack
 
-- **服务框架**: FastAPI
-- **向量数据库**: Qdrant embedded
-- **推理后端**: fastembed
-- **文件监听**: watchdog
-- **元数据存储**: SQLite
+- **API framework**: FastAPI
+- **Vector database**: Qdrant embedded mode
+- **Inference backend**: fastembed
+- **Metadata store**: SQLite
+- **Filesystem watcher**: watchdog
 
-当前使用的模型：
+Current models:
 
 - Dense embedding: `jinaai/jina-embeddings-v2-base-zh`
 - Sparse embedding: `Qdrant/bm25`
 - Reranker: `jinaai/jina-reranker-v2-base-multilingual`
 
-## 目录结构
+## Project layout
 
 ```text
 .
-├── main.py                  # FastAPI 入口
+├── main.py
 ├── pyproject.toml
 ├── README.md
+├── README_cn.md
 ├── docs/
-│   └── design.md            # 设计说明
+│   └── design.md
 ├── hermit/
-│   ├── cli.py               # 命令行入口
-│   ├── config.py            # 全局配置
+│   ├── cli.py
+│   ├── config.py
 │   ├── api/
-│   │   ├── routes.py        # HTTP 路由
-│   │   └── schemas.py       # API 模型定义
+│   │   ├── routes.py
+│   │   └── schemas.py
 │   ├── ingestion/
-│   │   ├── chunker.py       # 文本分块
-│   │   ├── scanner.py       # 启动扫描 / 增量同步
-│   │   ├── task_queue.py    # 后台索引任务
-│   │   └── watcher.py       # 文件系统监听
+│   │   ├── chunker.py
+│   │   ├── scanner.py
+│   │   ├── task_queue.py
+│   │   └── watcher.py
 │   ├── retrieval/
-│   │   ├── embedder.py      # dense / sparse 编码
-│   │   ├── reranker.py      # reranker 封装
-│   │   └── searcher.py      # 混合搜索
+│   │   ├── embedder.py
+│   │   ├── reranker.py
+│   │   └── searcher.py
 │   └── storage/
-│       ├── metadata.py      # SQLite 元数据
+│       ├── metadata.py
 │       ├── model_signature.py
-│       ├── qdrant.py        # Qdrant 操作
-│       └── registry.py      # collection 注册表
+│       ├── qdrant.py
+│       └── registry.py
 ├── data/
-│   ├── collections.json     # collection 持久化配置
-│   ├── metadata/            # SQLite 元数据库
-│   └── qdrant/              # Qdrant embedded 数据
-└── models/                  # 本地模型缓存
+│   ├── collections.json
+│   ├── metadata/
+│   └── qdrant/
+└── models/
 ```
 
-## 安装
+## Installation
 
-### 运行环境
+### Requirements
 
 - Python `3.12+`
-- macOS / Linux 均可运行
-- 建议使用虚拟环境
+- macOS or Linux
 
-### 安装依赖
+Using a virtual environment is recommended.
 
-如果你在项目根目录：
+### Install from source
 
 ```bash
 python -m venv .venv
@@ -125,84 +129,84 @@ pip install -U pip
 pip install -e .
 ```
 
-如果你计划使用 `hermit download` 预下载模型，建议额外确认已安装 `huggingface_hub`；该命令依赖它来拉取模型快照。
+If you plan to use `hermit download`, make sure `huggingface_hub` is available in your environment, since the CLI uses it to download model snapshots.
 
-## 快速开始
+## Quick start
 
-### 1. 下载模型（可选但推荐）
+### 1. Download models (optional but recommended)
 
 ```bash
 hermit download
 ```
 
-可选参数：
+Optional flags:
 
 ```bash
 hermit download --force
 hermit download --skip-verify
 ```
 
-说明：
+Notes:
 
-- 首次运行服务时，如果模型不存在，也会在预热阶段自动下载
-- 手动下载的好处是首次启动更可控，不会把等待时间藏在服务启动里
+- missing models can also be downloaded automatically on first service startup
+- downloading them explicitly makes first boot less surprising and easier to monitor
 
-### 2. 注册一个知识库目录
+### 2. Register a knowledge-base folder
 
 ```bash
 hermit kb add my_docs ./documents
 ```
 
-带自定义分块参数：
+With custom chunking settings:
 
 ```bash
 hermit kb add my_docs ./documents --chunk-size 512 --chunk-overlap 64
 ```
 
-查看已注册的知识库：
+List collections:
 
 ```bash
 hermit kb list
 ```
 
-删除一个知识库：
+Remove a collection:
 
 ```bash
 hermit kb remove my_docs
 ```
 
-Collection 名称规则：
+Collection naming rules:
 
-- 必须以字母或数字开头
-- 仅允许字母、数字、下划线 `_`、连字符 `-`
-- 不能重复
+- must start with a letter or digit
+- may contain only letters, digits, underscores, and hyphens
+- must be unique
 
-### 3. 启动服务
+### 3. Start the service
 
 ```bash
 python main.py
 ```
 
-服务启动后会做这些事：
+On startup, Hermit will:
 
-- 预热 embedding / reranker 模型
-- 启动后台索引任务 worker
-- 恢复 `data/collections.json` 中保存的 collection 配置
-- 对每个 collection 做启动扫描
-- 启动文件系统监听
+- warm up embedding and reranker models
+- start the background indexing worker
+- restore persisted collections from `data/collections.json`
+- scan each collection folder
+- start watching registered folders for changes
 
-默认监听地址：
+Default bind address:
 
 - Host: `0.0.0.0`
 - Port: `8000`
 
-### 4. 发起搜索
+### 4. Search
 
 ```bash
 curl -X POST http://127.0.0.1:8000/search \
 	-H 'Content-Type: application/json' \
 	-d '{
-		"query": "two sum 的思路",
+		"query": "two sum approach",
 		"collection": "my_docs",
 		"top_k": 5,
 		"w_dense": 0.7,
@@ -211,39 +215,39 @@ curl -X POST http://127.0.0.1:8000/search \
 	}'
 ```
 
-## 命令行说明
+## CLI
 
-Hermit 提供 `hermit` 命令：
+Hermit currently provides these CLI commands.
 
 ### `hermit download`
 
-下载所有必需模型，并可选执行简单校验。
+Download all required models and optionally run a basic verification step.
 
 ```bash
 hermit download
 ```
 
-参数：
+Flags:
 
-- `--force`: 强制重新下载
-- `--skip-verify`: 跳过下载后的模型验证
+- `--force`: force re-download
+- `--skip-verify`: skip post-download verification
 
 ### `hermit kb add <name> <dir>`
 
-注册一个知识库目录。
+Register a folder as a collection.
 
 ```bash
 hermit kb add notes ./documents
 ```
 
-可选参数：
+Optional flags:
 
 - `--chunk-size`
 - `--chunk-overlap`
 
 ### `hermit kb remove <name>`
 
-移除一个知识库，并删除对应的元数据记录。
+Remove a collection and delete its metadata store.
 
 ```bash
 hermit kb remove notes
@@ -251,7 +255,7 @@ hermit kb remove notes
 
 ### `hermit kb list`
 
-列出所有已注册知识库。
+List all registered collections.
 
 ```bash
 hermit kb list
@@ -259,17 +263,17 @@ hermit kb list
 
 ## HTTP API
 
-当前代码中已经实现以下接口。
+The current codebase exposes the following endpoints.
 
 ### `POST /search`
 
-执行混合语义检索。
+Run hybrid semantic search.
 
-请求体示例：
+Request example:
 
 ```json
 {
-	"query": "滑动窗口最大值",
+	"query": "sliding window maximum",
 	"collection": "my_docs",
 	"top_k": 5,
 	"w_dense": 0.7,
@@ -278,7 +282,7 @@ hermit kb list
 }
 ```
 
-返回示例：
+Response example:
 
 ```json
 {
@@ -296,15 +300,15 @@ hermit kb list
 
 ### `POST /collections/{name}/sync`
 
-对指定 collection 手动触发一次扫描同步。
+Trigger a manual scan/sync for a collection.
 
-返回字段：
+Response fields:
 
 - `added`
 - `updated`
 - `deleted`
 
-示例：
+Example:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/collections/my_docs/sync
@@ -312,9 +316,9 @@ curl -X POST http://127.0.0.1:8000/collections/my_docs/sync
 
 ### `GET /collections/{name}/status`
 
-查看 collection 当前状态。
+Get collection status.
 
-返回字段：
+Response fields:
 
 - `name`
 - `folder_path`
@@ -322,7 +326,7 @@ curl -X POST http://127.0.0.1:8000/collections/my_docs/sync
 - `total_chunks`
 - `watching`
 
-示例：
+Example:
 
 ```bash
 curl http://127.0.0.1:8000/collections/my_docs/status
@@ -330,9 +334,9 @@ curl http://127.0.0.1:8000/collections/my_docs/status
 
 ### `GET /collections/{name}/tasks`
 
-查看 collection 的后台索引任务状态。
+Get background indexing task status for a collection.
 
-返回字段：
+Response fields:
 
 - `collection`
 - `pending_tasks`
@@ -340,79 +344,77 @@ curl http://127.0.0.1:8000/collections/my_docs/status
 - `in_progress_tasks`
 - `worker_alive`
 
-示例：
+Example:
 
 ```bash
 curl http://127.0.0.1:8000/collections/my_docs/tasks
 ```
 
-## 数据存储说明
+## Storage layout
 
-Hermit 默认把运行数据保存在项目目录下：
+By default, Hermit stores its runtime data inside the project directory:
 
-- `models/`: 模型缓存
-- `data/qdrant/`: Qdrant embedded 数据
-- `data/metadata/`: 每个 collection 的 SQLite 元数据库
-- `data/collections.json`: 已注册 collection 的持久化配置
+- `models/`: local model cache
+- `data/qdrant/`: Qdrant embedded data
+- `data/metadata/`: one SQLite database per collection
+- `data/collections.json`: persisted collection configuration
 
-这意味着它非常适合本地单机使用，也意味着你可以直接备份整个项目目录来保留检索状态与模型缓存。
+That makes the project easy to back up, move, and clean up. No mysterious hidden cave system under your home directory.
 
-## 索引行为说明
+## Indexing behavior
 
-### 文件读取规则
+### File handling
 
-- 递归扫描目录下所有**非隐藏文件**
-- 跳过路径中任一段以 `.` 开头的文件/目录
-- 按文本文件读取，编码使用 `utf-8`，读取失败时使用 `errors="replace"`
+- recursively scans all non-hidden files
+- skips any path segment starting with `.`
+- reads files as text with `utf-8` and `errors="replace"`
 
-### 变更检测规则
+### Change detection
 
-Hermit 通过 SQLite 维护每个已索引文件的记录，并使用 **SHA256** 判断文件内容是否变化。
+Hermit tracks indexed files in SQLite and uses **SHA256** to detect content changes.
 
-扫描时会处理三类变化：
+During scanning it handles:
 
-- **新增文件**：加入索引任务
-- **修改文件**：重新切块、重新向量化、覆盖旧数据
-- **删除文件**：从 Qdrant 和 SQLite 中清除
+- **new files**: enqueue or index them
+- **modified files**: rechunk, re-embed, and replace old chunks
+- **deleted files**: remove them from Qdrant and SQLite
 
-### 分块规则
+### Chunking rules
 
-- 默认每 `512` 个字符一个 chunk
-- 相邻 chunk 重叠 `64` 个字符
-- 空白文本不会被索引
-- 短文本不会被强制切成多个块
+- default chunk size is `512` characters
+- adjacent chunks overlap by `64` characters
+- empty text is skipped
+- short text stays as a single chunk
 
-## 已知限制
+## Known limitations
 
-当前实现已经很好用，但也有几处值得提前知道：
+- there is currently **no API** to create or delete collections; use the CLI for that
+- `w_dense` and `w_sparse` are accepted by the API, but the current implementation uses **RRF fusion** rather than explicit weighted score fusion
+- all files are treated as text; PDF, image, and Office parsing are out of scope
+- the maximum number of collections is currently `4`
+- first-time model downloads may take a while and use noticeable disk space
 
-- 目前 API **没有**提供新增 / 删除 collection 的接口，这部分由 CLI 管理
-- `w_dense` / `w_sparse` 参数目前在接口中保留，但搜索实现实际使用的是 **RRF 融合**，不是显式加权打分
-- 所有文件都按文本读取，不负责 PDF、图片、Office 文档等格式解析
-- 最大 collection 数量当前限制为 `4`
-- 首次下载模型可能较慢，且占用一定磁盘空间
+## Development and testing
 
-## 开发与测试
+The test suite currently covers:
 
-项目当前包含 pytest 测试，主要覆盖：
+- CLI validation and collection management
+- scanner add/update/delete logic
+- task queue status reporting
+- selected API route behavior
 
-- CLI 注册与参数校验
-- scanner 增删改逻辑
-- task queue 状态统计
-- 部分 API 路由行为
-
-运行测试：
+Run tests with:
 
 ```bash
 pytest
 ```
 
-## 设计文档
+## Design notes
 
-更详细的实现思路见：
+For implementation details, see:
 
 - `docs/design.md`
 
-## 一句话总结
+## In one sentence
 
-如果你想要一个**纯本地、可持续监听目录、支持多知识库的轻量语义搜索服务**，Hermit 就是那种“不吵不闹，但很能干”的工具型选手。
+If you want a small, local-first, multi-collection semantic search service that quietly gets the job done, Hermit fits the brief nicely.
