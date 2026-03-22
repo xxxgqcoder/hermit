@@ -31,13 +31,6 @@ class SearchResponse(BaseModel):
     results: list[SearchResult]
 
 
-class CreateCollectionRequest(BaseModel):
-    name: str
-    folder_path: str
-    chunk_size: int = DEFAULT_CHUNK_SIZE
-    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP
-
-
 class CollectionStatus(BaseModel):
     name: str
     folder_path: str
@@ -58,3 +51,17 @@ class SyncResponse(BaseModel):
     added: int
     updated: int
     deleted: int
+
+
+class HealthCollectionInfo(BaseModel):
+    name: str
+    indexed_files: int
+    total_chunks: int
+
+
+class HealthResponse(BaseModel):
+    status: str  # "ready", "starting"
+    uptime: float
+    models_loaded: bool
+    collections: list[HealthCollectionInfo]
+    pending_index_tasks: int

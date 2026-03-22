@@ -4,7 +4,8 @@ from fastapi import APIRouter, HTTPException
 from hermit.api.schemas import (
     CollectionStatus,
     CollectionTaskStatus,
-    CreateCollectionRequest,
+    HealthCollectionInfo,
+    HealthResponse,
     SearchRequest,
     SearchResponse,
     SearchResult,
@@ -12,11 +13,8 @@ from hermit.api.schemas import (
 )
 from hermit.ingestion.scanner import scan_folder
 from hermit.ingestion.task_queue import get_collection_task_status
-from hermit.ingestion.watcher import start_watching, stop_watching
 from hermit.retrieval.searcher import search
 from hermit.storage.metadata import MetadataStore
-from hermit.storage.qdrant import delete_collection, ensure_collection
-from hermit.storage import registry
 
 logger = logging.getLogger(__name__)
 
@@ -39,43 +37,6 @@ def do_search(req: SearchRequest):
         rerank_candidates=req.rerank_candidates,
     )
     return SearchResponse(results=[SearchResult(**r) for r in results])
-
-
-@router.post("/collections", response_model=SyncResponse)
-def create_collection(req: CreateCollectionRequest):
-    if req.name in _collections:
-        raise HTTPException(status_code=409, detail=f"Collection '{req.name}' already exists")
-
-    ensure_collection(req.name)
-    stats = scan_folder(
-        req.name,
-        req.folder_path,
-        req.chunk_size,
-        req.chunk_overlap,
-        defer_indexing=True,
-    )
-    start_watching(req.name, req.folder_path, req.chunk_size, req.chunk_overlap)
-
-    cfg = {
-        "folder_path": req.folder_path,
-        "chunk_size": req.chunk_size,
-        "chunk_overlap": req.chunk_overlap,
-    }
-    _collections[req.name] = cfg
-    registry.register(req.name, req.folder_path, req.chunk_size, req.chunk_overlap)
-    return SyncResponse(**stats)
-
-
-@router.delete("/collections/{name}")
-def remove_collection(name: str):
-    if name not in _collections:
-        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
-    stop_watching(name)
-    delete_collection(name)
-    MetadataStore(name).destroy()
-    _collections.pop(name, None)
-    registry.unregister(name)
-    return {"detail": f"Collection '{name}' deleted"}
 
 
 @router.post("/collections/{name}/sync", response_model=SyncResponse)
@@ -105,6 +66,33 @@ def collection_status(name: str):
         folder_path=cfg["folder_path"],
         watching=True,
         **status,
+    )
+
+
+@router.get("/health", response_model=HealthResponse)
+def health():
+    from hermit.app import get_server_state
+    state = get_server_state()
+
+    collections_info = []
+    total_pending = 0
+    for name in _collections:
+        meta = MetadataStore(name)
+        status = meta.get_status()
+        collections_info.append(HealthCollectionInfo(
+            name=name,
+            indexed_files=status["indexed_files"],
+            total_chunks=status["total_chunks"],
+        ))
+        task_status = get_collection_task_status(name)
+        total_pending += task_status["pending_tasks"]
+
+    return HealthResponse(
+        status="ready" if state["ready"] else "starting",
+        uptime=state["uptime"],
+        models_loaded=state["ready"],
+        collections=collections_info,
+        pending_index_tasks=total_pending,
     )
 
 
