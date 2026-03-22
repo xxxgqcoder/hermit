@@ -1,18 +1,33 @@
 ---
 name: hermit-search
 description: 'Local semantic search over knowledge base collections powered by Hermit. Use when: searching knowledge base, semantic search, querying documents, managing collections, adding knowledge base, indexing files.'
+version: 1.0.0
+metadata:
+  openclaw:
+    requires:
+      bins:
+        - hermit
+        - uv
+    os:
+      - macos
+    homepage: https://github.com/xxxgqcoder/hermit
 ---
 
 # Skill: hermit-search
 
 Hermit 本地语义搜索服务的使用指南。Hermit 提供基于向量的混合检索（Dense + Sparse）和 Cross-Encoder 精排，支持多知识库管理。
 
+## 平台支持
+
+- **macOS**：已测试通过
+- **Linux**：即将支持（短期内增加测试）
+
 ## 前置条件
 
 ### 安装
 
 ```sh
-uv tool install hermit
+uv tool install git+https://github.com/xxxgqcoder/hermit.git
 # 部署 Skill 到 ~/.agents/skills/hermit-search/（可选，使 Agent 自动发现）
 hermit install-skills
 ```
