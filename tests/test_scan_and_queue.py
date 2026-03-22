@@ -27,12 +27,12 @@ def test_registry_round_trip(tmp_data_root):
 
     assert get_all() == {}
 
-    register("col1", "/tmp/docs", 512, 64)
+    register("col1", "/tmp/docs")
     all_ = get_all()
     assert "col1" in all_
     assert all_["col1"]["folder_path"] == "/tmp/docs"
 
-    register("col2", "/tmp/other", 256, 32)
+    register("col2", "/tmp/other")
     assert len(get_all()) == 2
 
     unregister("col1")
@@ -189,6 +189,86 @@ def test_scan_folder_sync_mode(mock_index, mock_qdrant, scan_env, tmp_path, monk
     assert mock_index.call_count == 2
 
 
+# ── Ignore pattern tests ────────────────────────────────────────
+
+
+def test_collect_files_ignore_extensions(tmp_path):
+    """_collect_files should exclude files matching ignore_extensions."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "readme.md").write_text("hello")
+    (folder / "image.png").write_text("img")
+    (folder / "data.PDF").write_text("pdf")  # uppercase
+
+    from hermit.ingestion.scanner import _collect_files
+
+    files = _collect_files(folder, ignore_extensions=[".png", ".pdf"])
+    names = {Path(f).name for f in files}
+    assert names == {"readme.md"}
+
+
+def test_collect_files_ignore_patterns(tmp_path):
+    """_collect_files should exclude files matching glob ignore_patterns."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "readme.md").write_text("hello")
+    (folder / "notes.log").write_text("log")
+    sub = folder / "build"
+    sub.mkdir()
+    (sub / "output.md").write_text("built")
+
+    from hermit.ingestion.scanner import _collect_files
+
+    files = _collect_files(folder, ignore_patterns=["*.log", "build/*"])
+    names = {Path(f).name for f in files}
+    assert names == {"readme.md"}
+
+
+def test_collect_files_ignore_both(tmp_path):
+    """_collect_files should apply both ignore_patterns and ignore_extensions."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "a.md").write_text("a")
+    (folder / "b.txt").write_text("b")
+    (folder / "c.log").write_text("c")
+    (folder / "d.pdf").write_text("d")
+
+    from hermit.ingestion.scanner import _collect_files
+
+    files = _collect_files(folder, ignore_patterns=["*.log"], ignore_extensions=[".pdf"])
+    names = {Path(f).name for f in files}
+    assert names == {"a.md", "b.txt"}
+
+
+@patch("hermit.ingestion.scanner.qdrant")
+@patch("hermit.ingestion.scanner.enqueue_index_task")
+def test_scan_folder_with_ignore(mock_enqueue, mock_qdrant, tmp_path, monkeypatch):
+    """scan_folder should skip files matching ignore rules."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "a.md").write_text("keep")
+    (folder / "b.log").write_text("skip")
+    (folder / "c.pdf").write_text("skip")
+
+    mock_enqueue.return_value = True
+    mock_meta = MagicMock()
+    mock_meta.get_all_records.return_value = {}
+    monkeypatch.setattr(
+        "hermit.ingestion.scanner.MetadataStore",
+        lambda name: mock_meta,
+    )
+
+    from hermit.ingestion.scanner import scan_folder
+
+    stats = scan_folder(
+        "test", str(folder), defer_indexing=True,
+        ignore_patterns=["*.log"], ignore_extensions=[".pdf"],
+    )
+
+    assert stats["added"] == 1
+    assert mock_enqueue.call_count == 1
+
+
 # ── Task queue tests ────────────────────────────────────────────
 
 
@@ -196,15 +276,19 @@ def test_task_queue_dedup():
     """Duplicate tasks for same (collection, file) should be rejected."""
     from hermit.ingestion.task_queue import IndexTask, _IndexTaskQueue
 
-    q = _IndexTaskQueue()
-    # Don't start worker — just test enqueue dedup logic
-    q._worker = threading.Thread()  # fake alive check
-    q._worker.start = lambda: None
+    q = _IndexTaskQueue(num_workers=1)
+    # Use a real daemon thread that blocks forever so is_alive() returns True
+    barrier = threading.Event()
+    t = threading.Thread(target=barrier.wait, daemon=True)
+    t.start()
+    q._workers = [t]
 
-    task = IndexTask("col", "/tmp/a.md", 512, 64)
+    task = IndexTask("col", "/tmp/a.md")
     # Manually add to pending to simulate enqueue without worker
     q._pending.add((task.collection_name, task.file_path))
     assert q.enqueue(task) is False  # should reject duplicate
+
+    barrier.set()  # let the thread exit
 
 
 def test_task_queue_status():
@@ -249,7 +333,7 @@ def test_tasks_endpoint_404(client):
 def test_tasks_endpoint_ok(mock_status, client):
     from hermit.api.routes import _collections
 
-    _collections["demo"] = {"folder_path": "/tmp", "chunk_size": 512, "chunk_overlap": 64}
+    _collections["demo"] = {"folder_path": "/tmp"}
     mock_status.return_value = {
         "collection": "demo",
         "pending_tasks": 3,

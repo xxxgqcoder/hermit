@@ -1,3 +1,4 @@
+import fnmatch
 import hashlib
 import logging
 import uuid
@@ -8,6 +9,7 @@ from hermit.ingestion.task_queue import enqueue_index_task
 from hermit.retrieval import embedder
 from hermit.storage.metadata import MetadataStore
 from hermit.storage import qdrant
+from hermit.storage.qdrant import CollectionCorruptedError
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +22,26 @@ def _file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def _collect_files(folder: Path) -> set[str]:
-    """Collect all non-hidden files under folder."""
+def _collect_files(
+    folder: Path,
+    ignore_patterns: list[str] | None = None,
+    ignore_extensions: list[str] | None = None,
+) -> set[str]:
+    """Collect all non-hidden files under folder, applying ignore rules."""
+    _patterns = ignore_patterns or []
+    _extensions = {e.lower() for e in (ignore_extensions or [])}
     files: set[str] = set()
     for file_path in folder.rglob("*"):
         if not file_path.is_file():
             continue
         if any(part.startswith(".") for part in file_path.parts):
             continue
+        if _extensions and file_path.suffix.lower() in _extensions:
+            continue
+        if _patterns:
+            rel = str(file_path.relative_to(folder))
+            if any(fnmatch.fnmatch(rel, pat) for pat in _patterns):
+                continue
         files.add(str(file_path))
     return files
 
@@ -36,8 +50,6 @@ def _index_file(
     collection_name: str,
     file_path: Path,
     meta: MetadataStore,
-    chunk_size: int,
-    chunk_overlap: int,
 ) -> bool:
     """Read, chunk, embed, and upsert a single file. Returns True on success."""
     fpath_str = str(file_path)
@@ -48,12 +60,21 @@ def _index_file(
         logger.warning("Failed to read %s: %s", fpath_str, e)
         return False
 
-    chunks = chunk_text(text, chunk_size=chunk_size, overlap=chunk_overlap)
+    chunks = chunk_text(text)
     if not chunks:
         return False
 
     # Delete old entries (safe even if none exist)
-    qdrant.delete_by_source_file(collection_name, fpath_str)
+    try:
+        qdrant.delete_by_source_file(collection_name, fpath_str)
+    except CollectionCorruptedError:
+        logger.warning(
+            "Collection '%s' was recreated due to data corruption; "
+            "clearing metadata so all files are re-indexed on next scan",
+            collection_name,
+        )
+        meta.destroy()
+        return False
 
     # Prepend document title to each chunk for embedding
     title = file_path.stem
@@ -87,9 +108,9 @@ def _index_file(
 def scan_folder(
     collection_name: str,
     folder_path: str,
-    chunk_size: int = 512,
-    chunk_overlap: int = 64,
     defer_indexing: bool = True,
+    ignore_patterns: list[str] | None = None,
+    ignore_extensions: list[str] | None = None,
 ) -> dict:
     """Scan folder and sync index with three-way diff. Returns stats.
 
@@ -103,7 +124,7 @@ def scan_folder(
     meta = MetadataStore(collection_name)
 
     # Step 1: Collect current disk files and indexed records
-    disk_files = _collect_files(folder)
+    disk_files = _collect_files(folder, ignore_patterns, ignore_extensions)
     indexed = meta.get_all_records()  # {path: (hash, mtime)}
     indexed_set = set(indexed.keys())
 
@@ -118,7 +139,16 @@ def scan_folder(
 
     # --- Handle deletions: indexed but file gone ---
     for fpath_str in to_delete:
-        qdrant.delete_by_source_file(collection_name, fpath_str)
+        try:
+            qdrant.delete_by_source_file(collection_name, fpath_str)
+        except CollectionCorruptedError:
+            logger.warning(
+                "Collection '%s' was recreated due to data corruption; "
+                "clearing metadata and aborting scan — re-scan to re-index all files",
+                collection_name,
+            )
+            meta.destroy()
+            return {"added": 0, "updated": 0, "deleted": 0, "corrupted": True}
         meta.delete(fpath_str)
         deleted += 1
         logger.info("Removed deleted file from index: %s", fpath_str)
@@ -126,10 +156,10 @@ def scan_folder(
     # --- Handle new files: on disk but not indexed ---
     for fpath_str in sorted(to_add):
         if defer_indexing:
-            if enqueue_index_task(collection_name, fpath_str, chunk_size, chunk_overlap):
+            if enqueue_index_task(collection_name, fpath_str):
                 added += 1
         else:
-            if _index_file(collection_name, Path(fpath_str), meta, chunk_size, chunk_overlap):
+            if _index_file(collection_name, Path(fpath_str), meta):
                 added += 1
 
     # --- Handle existing: check hash for changes ---
@@ -139,10 +169,10 @@ def scan_folder(
         if current_hash == old_hash:
             continue
         if defer_indexing:
-            if enqueue_index_task(collection_name, fpath_str, chunk_size, chunk_overlap):
+            if enqueue_index_task(collection_name, fpath_str):
                 updated += 1
         else:
-            if _index_file(collection_name, Path(fpath_str), meta, chunk_size, chunk_overlap):
+            if _index_file(collection_name, Path(fpath_str), meta):
                 updated += 1
 
     return {"added": added, "updated": updated, "deleted": deleted}
@@ -151,8 +181,8 @@ def scan_folder(
 def rebuild_collection(
     collection_name: str,
     folder_path: str,
-    chunk_size: int = 512,
-    chunk_overlap: int = 64,
+    ignore_patterns: list[str] | None = None,
+    ignore_extensions: list[str] | None = None,
 ):
     """Drop and recreate a collection, then re-index all files via task queue."""
     logger.info("Rebuilding index for collection '%s'...", collection_name)
@@ -161,7 +191,7 @@ def rebuild_collection(
     return scan_folder(
         collection_name,
         folder_path,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
         defer_indexing=True,
+        ignore_patterns=ignore_patterns,
+        ignore_extensions=ignore_extensions,
     )

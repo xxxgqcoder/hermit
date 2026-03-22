@@ -50,8 +50,8 @@ Each registered folder goes through:
 
 ### Default settings
 
-- Chunk size: `512`
-- Chunk overlap: `64`
+- Chunk size: `256` tokens (using the embedding model's tokenizer)
+- Chunk overlap: `32` tokens
 - Search `top_k`: `5`
 - Default `w_dense`: `0.7`
 - Default `w_sparse`: `0.3`
@@ -157,12 +157,6 @@ Notes:
 hermit kb add my_docs ./documents
 ```
 
-With custom chunking settings:
-
-```bash
-hermit kb add my_docs ./documents --chunk-size 512 --chunk-overlap 64
-```
-
 List collections:
 
 ```bash
@@ -239,11 +233,6 @@ Register a folder as a collection.
 ```bash
 hermit kb add notes ./documents
 ```
-
-Optional flags:
-
-- `--chunk-size`
-- `--chunk-overlap`
 
 ### `hermit kb remove <name>`
 
@@ -381,8 +370,8 @@ During scanning it handles:
 
 ### Chunking rules
 
-- default chunk size is `512` characters
-- adjacent chunks overlap by `64` characters
+- default chunk size is `256` tokens (using the embedding model's tokenizer)
+- adjacent chunks overlap by `32` tokens
 - empty text is skipped
 - short text stays as a single chunk
 

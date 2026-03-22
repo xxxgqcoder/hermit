@@ -3,7 +3,7 @@ from qdrant_client import models
 
 from hermit.config import DEFAULT_RERANK_CANDIDATES, DEFAULT_W_DENSE, DEFAULT_W_SPARSE
 from hermit.retrieval import embedder, reranker
-from hermit.storage.qdrant import client
+from hermit.storage import qdrant
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +20,8 @@ def search(
     dense_vec = embedder.embed_query_dense(query)
     sparse_vec = embedder.embed_query_sparse(query)
 
-    c = client()
-
-    # Qdrant prefetch-based hybrid search
-    results = c.query_points(
+    # Thread-safe query via qdrant module lock
+    results = qdrant.query_points(
         collection_name=collection_name,
         prefetch=[
             models.Prefetch(

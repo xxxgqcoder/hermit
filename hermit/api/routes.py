@@ -47,9 +47,9 @@ def sync_collection(name: str):
     stats = scan_folder(
         name,
         cfg["folder_path"],
-        cfg["chunk_size"],
-        cfg["chunk_overlap"],
         defer_indexing=True,
+        ignore_patterns=cfg.get("ignore_patterns", []),
+        ignore_extensions=cfg.get("ignore_extensions", []),
     )
     return SyncResponse(**stats)
 

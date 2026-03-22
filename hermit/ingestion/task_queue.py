@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
 
+from hermit.config import INDEX_WORKERS
 from hermit.storage import qdrant
+from hermit.storage.qdrant import CollectionCorruptedError
 from hermit.storage.metadata import MetadataStore
 
 logger = logging.getLogger(__name__)
@@ -14,25 +16,36 @@ logger = logging.getLogger(__name__)
 class IndexTask:
     collection_name: str
     file_path: str
-    chunk_size: int
-    chunk_overlap: int
 
 
 class _IndexTaskQueue:
-    def __init__(self):
+    def __init__(self, num_workers: int = INDEX_WORKERS):
         self._queue: Queue[IndexTask] = Queue()
         self._pending: set[tuple[str, str]] = set()
         self._in_progress: set[tuple[str, str]] = set()
         self._lock = threading.Lock()
-        self._worker: threading.Thread | None = None
+        self._workers: list[threading.Thread] = []
+        self._num_workers = max(1, num_workers)
 
     def start(self):
         with self._lock:
-            if self._worker is not None and self._worker.is_alive():
+            alive = [w for w in self._workers if w.is_alive()]
+            if len(alive) >= self._num_workers:
                 return
-            self._worker = threading.Thread(target=self._run, name="index-task-worker", daemon=True)
-            self._worker.start()
-            logger.info("Index task worker started")
+            # Launch missing workers
+            for i in range(self._num_workers - len(alive)):
+                idx = len(alive) + i
+                w = threading.Thread(
+                    target=self._run,
+                    name=f"index-worker-{idx}",
+                    daemon=True,
+                )
+                w.start()
+                alive.append(w)
+            self._workers = alive
+            logger.info(
+                "Index worker pool: %d workers running", len(self._workers)
+            )
 
     def enqueue(self, task: IndexTask) -> bool:
         self.start()
@@ -66,14 +79,14 @@ class _IndexTaskQueue:
             in_progress = [k for k in self._in_progress if k[0] == collection_name]
             in_progress_set = set(in_progress)
             queued = [k for k in pending if k not in in_progress_set]
-            worker_alive = self._worker is not None and self._worker.is_alive()
+            alive = [w for w in self._workers if w.is_alive()]
 
         return {
             "collection": collection_name,
             "pending_tasks": len(pending),
             "queued_tasks": len(queued),
             "in_progress_tasks": len(in_progress),
-            "worker_alive": worker_alive,
+            "worker_alive": len(alive) > 0,
         }
 
     def _handle_task(self, task: IndexTask):
@@ -83,7 +96,16 @@ class _IndexTaskQueue:
         meta = MetadataStore(task.collection_name)
 
         if not file_path.exists() or not file_path.is_file():
-            qdrant.delete_by_source_file(task.collection_name, task.file_path)
+            try:
+                qdrant.delete_by_source_file(task.collection_name, task.file_path)
+            except CollectionCorruptedError:
+                logger.warning(
+                    "Collection '%s' was recreated due to data corruption; "
+                    "clearing metadata — re-scan to re-index all files",
+                    task.collection_name,
+                )
+                meta.destroy()
+                return
             meta.delete(task.file_path)
             logger.info("Skipped stale task and cleaned missing file: %s", task.file_path)
             return
@@ -92,8 +114,6 @@ class _IndexTaskQueue:
             task.collection_name,
             file_path,
             meta,
-            chunk_size=task.chunk_size,
-            chunk_overlap=task.chunk_overlap,
         )
         if ok:
             logger.info("Indexed by background task: %s", task.file_path)
@@ -109,15 +129,11 @@ def start_task_worker():
 def enqueue_index_task(
     collection_name: str,
     file_path: str,
-    chunk_size: int,
-    chunk_overlap: int,
 ) -> bool:
     return _QUEUE.enqueue(
         IndexTask(
             collection_name=collection_name,
             file_path=file_path,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
         )
     )
 

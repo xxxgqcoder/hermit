@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "hermit"
 version = "0.1.0"
@@ -9,12 +13,11 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "qdrant-client>=1.13",
     "fastembed>=0.6",
-    "watchdog>=6",
     "huggingface_hub>=0.20",
 ]
 
 [project.scripts]
 hermit = "hermit.cli:main"
 
-[tool.setuptools.packages.find]
-include = ["hermit*"]
+[tool.hatch.build.targets.wheel.force-include]
+".agents/skills/hermit-search" = "hermit/_skills/hermit-search"

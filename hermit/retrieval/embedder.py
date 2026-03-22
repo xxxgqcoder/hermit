@@ -1,4 +1,5 @@
 import logging
+import threading
 from fastembed import TextEmbedding, SparseTextEmbedding
 
 from hermit.config import MODEL_ROOT, DENSE_MODEL, SPARSE_MODEL
@@ -7,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 _dense_model: TextEmbedding | None = None
 _sparse_model: SparseTextEmbedding | None = None
+_embed_lock = threading.Lock()
 
 
 def _get_dense_model() -> TextEmbedding:
@@ -35,13 +37,15 @@ def _get_sparse_model() -> SparseTextEmbedding:
 
 def embed_dense(texts: list[str]) -> list[list[float]]:
     model = _get_dense_model()
-    embeddings = list(model.embed(texts, batch_size=32))
+    with _embed_lock:
+        embeddings = list(model.embed(texts, batch_size=32))
     return [e.tolist() for e in embeddings]
 
 
 def embed_sparse(texts: list[str]) -> list:
     model = _get_sparse_model()
-    return list(model.embed(texts, batch_size=32))
+    with _embed_lock:
+        return list(model.embed(texts, batch_size=32))
 
 
 def embed_query_dense(query: str) -> list[float]:

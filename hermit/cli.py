@@ -13,6 +13,8 @@ Usage:
     hermit collection status <name>       # collection indexing status
     hermit collection sync <name>         # trigger sync
     hermit collection tasks <name>        # indexing task status
+    hermit install-skills                 # install skills to ~/.agents/skills/
+    hermit install-skills --uninstall     # remove installed skills
 
 All commands output JSON to stdout. Use --pretty for indented output.
 Errors: {"error": "message"} with non-zero exit code.
@@ -23,7 +25,6 @@ import json
 import logging
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -31,15 +32,15 @@ import urllib.error
 import urllib.request
 
 from hermit.config import (
-    DEFAULT_CHUNK_OVERLAP,
-    DEFAULT_CHUNK_SIZE,
     DEFAULT_RERANK_CANDIDATES,
     DEFAULT_TOP_K,
     HERMIT_HOME,
     HOST,
     LOG_DIR,
     PID_FILE,
-    PORT,
+    load_port,
+    resolve_port,
+    save_port,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def _api_request(method: str, path: str, body: dict | None = None) -> dict:
 
     Raises SystemExit with JSON error on failure.
     """
-    url = f"http://127.0.0.1:{PORT}{path}"
+    url = f"http://127.0.0.1:{load_port()}{path}"
     data = json.dumps(body).encode() if body else None
     headers = {"Content-Type": "application/json"} if body else {}
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -109,21 +110,16 @@ def _read_pid() -> int | None:
         return None
 
 
-def _is_port_in_use(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(("127.0.0.1", port)) == 0
-
-
 # ── Server commands ─────────────────────────────────────────────
 
 
 def cmd_start(_args):
     pid = _read_pid()
     if pid is not None:
-        _output({"status": "already_running", "pid": pid, "port": PORT})
+        _output({"status": "already_running", "pid": pid, "port": load_port()})
 
-    if _is_port_in_use(PORT):
-        _error(f"port {PORT} is already in use")
+    port = resolve_port()
+    save_port(port)
 
     # Ensure directories exist
     HERMIT_HOME.mkdir(parents=True, exist_ok=True)
@@ -138,7 +134,7 @@ def cmd_start(_args):
                 sys.executable, "-m", "uvicorn",
                 "hermit.app:app",
                 "--host", HOST,
-                "--port", str(PORT),
+                "--port", str(port),
             ],
             stdout=lf,
             stderr=subprocess.STDOUT,
@@ -158,7 +154,7 @@ def cmd_start(_args):
             _error(f"server process exited unexpectedly, check {log_file}")
 
         try:
-            url = f"http://127.0.0.1:{PORT}/health"
+            url = f"http://127.0.0.1:{port}/health"
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=3) as resp:
                 health = json.loads(resp.read())
@@ -166,9 +162,9 @@ def cmd_start(_args):
             continue
 
         if health.get("status") == "ready":
-            _output({"status": "started", "pid": proc.pid, "port": PORT})
+            _output({"status": "started", "pid": proc.pid, "port": port})
 
-    _output({"status": "starting", "pid": proc.pid, "port": PORT,
+    _output({"status": "starting", "pid": proc.pid, "port": port,
              "warning": "health check timed out, server may still be loading models"})
 
 
@@ -202,8 +198,9 @@ def cmd_status(_args):
     if pid is None:
         _output({"status": "stopped"})
 
+    port = load_port()
     try:
-        url = f"http://127.0.0.1:{PORT}/health"
+        url = f"http://127.0.0.1:{port}/health"
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=3) as resp:
             health = json.loads(resp.read())
@@ -264,11 +261,21 @@ def cmd_kb_add(args):
         _error(f"'{folder}' is not a directory")
 
     try:
-        register(args.name, str(folder), args.chunk_size, args.chunk_overlap)
+        register(
+            args.name,
+            str(folder),
+            ignore_patterns=args.ignore or None,
+            ignore_extensions=args.ignore_ext or None,
+        )
     except ValueError as e:
         _error(str(e))
 
-    _output({"status": "added", "name": args.name, "folder_path": str(folder)})
+    result = {"status": "added", "name": args.name, "folder_path": str(folder)}
+    if args.ignore:
+        result["ignore_patterns"] = args.ignore
+    if args.ignore_ext:
+        result["ignore_extensions"] = args.ignore_ext
+    _output(result)
 
 
 def cmd_kb_remove(args):
@@ -282,6 +289,28 @@ def cmd_kb_remove(args):
     unregister(args.name)
     MetadataStore(args.name).destroy()
     _output({"status": "removed", "name": args.name})
+
+
+def cmd_kb_update(args):
+    from hermit.storage.registry import get_all, update
+
+    existing = get_all()
+    if args.name not in existing:
+        _error(f"collection '{args.name}' not found")
+
+    try:
+        update(
+            args.name,
+            ignore_patterns=args.ignore or None,
+            ignore_extensions=args.ignore_ext or None,
+            clear_ignore=args.clear_ignore,
+            clear_ignore_ext=args.clear_ignore_ext,
+        )
+    except ValueError as e:
+        _error(str(e))
+
+    updated = get_all()[args.name]
+    _output({"status": "updated", "name": args.name, **updated})
 
 
 def cmd_kb_list(_args):
@@ -306,6 +335,78 @@ def cmd_collection_sync(args):
 def cmd_collection_tasks(args):
     result = _api_request("GET", f"/collections/{args.name}/tasks")
     _output(result)
+
+
+# ── Skill distribution ──────────────────────────────────────────
+
+
+def _find_skills_dir() -> "Path | None":
+    """Locate the skills source directory.
+
+    Priority:
+    1. Package-internal: hermit/_skills/ (installed mode)
+    2. Repository: .agents/skills/ relative to project root (dev mode)
+    """
+    from pathlib import Path
+
+    # 1. Package-internal (_skills/ injected by hatchling force-include)
+    pkg_skills = Path(__file__).parent / "_skills"
+    if pkg_skills.is_dir():
+        return pkg_skills
+
+    # 2. Dev mode: walk up from hermit/ to repo root, look for .agents/skills/
+    repo_root = Path(__file__).parent.parent
+    dev_skills = repo_root / ".agents" / "skills"
+    if dev_skills.is_dir():
+        return dev_skills
+
+    return None
+
+
+# Project name used as origin marker for installed skills
+_PROJECT_NAME = "hermit"
+
+
+def cmd_install_skills(args):
+    import shutil
+    from pathlib import Path
+
+    skills_src = _find_skills_dir()
+    if skills_src is None:
+        _error("no skills directory found")
+
+    # Install directly under ~/.agents/skills/{skill_name}/
+    global_skills_dir = Path.home() / ".agents" / "skills"
+    # Collect skill names from source
+    skill_names = [d.name for d in skills_src.iterdir() if d.is_dir() and (d / "SKILL.md").exists()]
+
+    if not skill_names:
+        _error("no skills found in source directory")
+
+    if args.uninstall:
+        removed = []
+        for name in skill_names:
+            target = global_skills_dir / name
+            if target.exists():
+                shutil.rmtree(target)
+                removed.append(name)
+        _output({"status": "uninstalled", "skills": removed})
+
+    # Install
+    global_skills_dir.mkdir(parents=True, exist_ok=True)
+    installed = []
+    for name in skill_names:
+        src = skills_src / name
+        dst = global_skills_dir / name
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        # Write origin marker for version tracking
+        origin = dst / ".origin"
+        origin.write_text(json.dumps({"package": _PROJECT_NAME, "version": "0.1.0"}))
+        installed.append(name)
+
+    _output({"status": "installed", "skills": installed, "target": str(global_skills_dir)})
 
 
 # ── Argument parser ─────────────────────────────────────────────
@@ -348,13 +449,24 @@ def main():
     kb_add = kb_sub.add_parser("add", help="Add a knowledge base directory")
     kb_add.add_argument("name", help="Collection alias")
     kb_add.add_argument("dir", help="Path to the directory")
-    kb_add.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE,
-                        help=f"Chunk size in characters (default: {DEFAULT_CHUNK_SIZE})")
-    kb_add.add_argument("--chunk-overlap", type=int, default=DEFAULT_CHUNK_OVERLAP,
-                        help=f"Chunk overlap in characters (default: {DEFAULT_CHUNK_OVERLAP})")
+    kb_add.add_argument("--ignore", action="append", default=[],
+                        help="Glob pattern for paths to ignore (repeatable)")
+    kb_add.add_argument("--ignore-ext", action="append", default=[],
+                        help="File extension to ignore, e.g. .pdf (repeatable)")
 
     kb_rm = kb_sub.add_parser("remove", help="Remove a knowledge base")
     kb_rm.add_argument("name", help="Collection name")
+
+    kb_update = kb_sub.add_parser("update", help="Update ignore rules for a knowledge base")
+    kb_update.add_argument("name", help="Collection name")
+    kb_update.add_argument("--ignore", action="append", default=[],
+                           help="Glob pattern for paths to ignore (replaces existing, repeatable)")
+    kb_update.add_argument("--ignore-ext", action="append", default=[],
+                           help="File extension to ignore, e.g. .pdf (replaces existing, repeatable)")
+    kb_update.add_argument("--clear-ignore", action="store_true",
+                           help="Clear all path ignore patterns")
+    kb_update.add_argument("--clear-ignore-ext", action="store_true",
+                           help="Clear all extension ignore patterns")
 
     kb_sub.add_parser("list", help="List all knowledge bases")
 
@@ -370,6 +482,10 @@ def main():
 
     col_tasks = col_sub.add_parser("tasks", help="Indexing task status")
     col_tasks.add_argument("name", help="Collection name")
+
+    # Skill distribution
+    sk = sub.add_parser("install-skills", help="Install agent skills to ~/.agents/skills/")
+    sk.add_argument("--uninstall", action="store_true", help="Remove installed skills")
 
     args = parser.parse_args()
 
@@ -393,6 +509,8 @@ def main():
             cmd_kb_add(args)
         elif args.kb_command == "remove":
             cmd_kb_remove(args)
+        elif args.kb_command == "update":
+            cmd_kb_update(args)
         elif args.kb_command == "list":
             cmd_kb_list(args)
         else:
@@ -406,6 +524,8 @@ def main():
             cmd_collection_tasks(args)
         else:
             col.print_help()
+    elif args.command == "install-skills":
+        cmd_install_skills(args)
     else:
         parser.print_help()
 

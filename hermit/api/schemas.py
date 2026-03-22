@@ -1,8 +1,6 @@
 from pydantic import BaseModel, Field
 
 from hermit.config import (
-    DEFAULT_CHUNK_OVERLAP,
-    DEFAULT_CHUNK_SIZE,
     DEFAULT_RERANK_CANDIDATES,
     DEFAULT_TOP_K,
     DEFAULT_W_DENSE,

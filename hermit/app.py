@@ -64,6 +64,8 @@ async def lifespan(app: FastAPI):
 
     for name, cfg in get_all().items():
         logger.info("Restoring collection '%s' from %s", name, cfg["folder_path"])
+        ig_pat = cfg.get("ignore_patterns", [])
+        ig_ext = cfg.get("ignore_extensions", [])
         try:
             if model_changed:
                 logger.warning(
@@ -72,20 +74,21 @@ async def lifespan(app: FastAPI):
                 rebuild_collection(
                     name,
                     cfg["folder_path"],
-                    chunk_size=cfg.get("chunk_size", 512),
-                    chunk_overlap=cfg.get("chunk_overlap", 64),
+                    ignore_patterns=ig_pat,
+                    ignore_extensions=ig_ext,
                 )
             else:
                 stats = scan_folder(
                     name,
                     cfg["folder_path"],
-                    chunk_size=cfg.get("chunk_size", 512),
-                    chunk_overlap=cfg.get("chunk_overlap", 64),
                     defer_indexing=True,
+                    ignore_patterns=ig_pat,
+                    ignore_extensions=ig_ext,
                 )
                 logger.info("Startup scan for '%s': %s", name, stats)
 
-            start_watching(name, cfg["folder_path"], cfg.get("chunk_size", 512), cfg.get("chunk_overlap", 64))
+            start_watching(name, cfg["folder_path"],
+                           ignore_patterns=ig_pat, ignore_extensions=ig_ext)
             _collections[name] = cfg
         except Exception:
             logger.exception("Failed to restore collection '%s'", name)

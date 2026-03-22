@@ -54,10 +54,11 @@
 
 ### 文本切片
 
-使用固定字符大小切片 + 滑动窗口重叠：
+使用 embedding 模型自带的 tokenizer 按 token 数切片 + 滑动窗口重叠：
 
-- 默认 `chunk_size=512` 字符，`overlap=64` 字符
-- 短文本（≤ chunk_size）不做切分
+- 默认 `chunk_tokens=256` tokens，`overlap_tokens=32` tokens
+- 使用模型 tokenizer 计数，消除中英文字符密度差异
+- 短文本（≤ chunk_tokens）不做切分
 - 空文本跳过
 
 ### 索引流程
