@@ -269,6 +269,51 @@ def test_scan_folder_with_ignore(mock_enqueue, mock_qdrant, tmp_path, monkeypatc
     assert mock_enqueue.call_count == 1
 
 
+
+@patch("hermit.ingestion.scanner.qdrant")
+@patch("hermit.ingestion.scanner.enqueue_index_task")
+def test_scan_folder_ignores_symlinks(mock_enqueue, mock_qdrant, scan_env, monkeypatch):
+    """Files symlinks and directory symlinks should be ignored."""
+    mock_enqueue.return_value = True
+
+    # Mock metadata store
+    mock_meta = MagicMock()
+    mock_meta.get_all_records.return_value = {}
+    monkeypatch.setattr(
+        "hermit.ingestion.scanner.MetadataStore",
+        lambda name: mock_meta,
+    )
+
+    # Create symlink to file
+    link_path = scan_env / "link.md"
+    os.symlink(scan_env / "a.md", link_path)
+
+    # Create directory and symlink to directory
+    sub = scan_env / "subdir"
+    sub.mkdir()
+    (sub / "subfile.md").write_text("sub content")
+
+    link_dir = scan_env / "link_dir"
+    os.symlink(sub, link_dir)
+
+    from hermit.ingestion.scanner import scan_folder
+
+    # Run scan
+    scan_folder("test", str(scan_env), defer_indexing=True)
+
+    enqueued_files = [str(call.args[1]) for call in mock_enqueue.mock_calls if len(call.args) > 1]
+
+    # a.md, b.md (from fixture) + subfile.md -> 3 Indexed
+    assert str(scan_env / "a.md") in enqueued_files
+    assert str(scan_env / "b.md") in enqueued_files
+    assert str(sub / "subfile.md") in enqueued_files
+
+    # link.md, link_dir -> Ignored
+    assert str(link_path) not in enqueued_files
+    # Ensure no files from link_dir are indexed
+    assert not any("link_dir" in f for f in enqueued_files)
+
+
 # ── Task queue tests ────────────────────────────────────────────
 
 
