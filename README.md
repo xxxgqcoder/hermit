@@ -12,7 +12,7 @@ It is designed for local-first workflows and works well as a lightweight retriev
 - **Multi-collection support**: one folder maps to one collection
 - **Hybrid retrieval**: dense + sparse recall
 - **Reranking**: a cross-encoder reranks the fused candidates
-- **Incremental sync**: startup scan plus filesystem watching
+- **Incremental sync**: startup scan plus periodic polling
 - **CPU-friendly**: built on `fastembed` + ONNX Runtime, no GPU required
 
 ## What it is good for
@@ -46,7 +46,7 @@ Each registered folder goes through:
 3. text chunking
 4. embedding generation
 5. Qdrant upsert
-6. ongoing filesystem watching
+6. ongoing periodic polling
 
 ### Default settings
 
@@ -55,7 +55,7 @@ Each registered folder goes through:
 - Search `top_k`: `5`
 - Default `w_dense`: `0.7`
 - Default `w_sparse`: `0.3`
-- Default rerank candidates: `30`
+- Default rerank candidates: `50`
 - Max collections: `4`
 - Max collection name length: `64`
 - Default port: `8000`
@@ -66,7 +66,7 @@ Each registered folder goes through:
 - **Vector database**: Qdrant embedded mode
 - **Inference backend**: fastembed
 - **Metadata store**: SQLite
-- **Filesystem watcher**: watchdog
+- **Filesystem watcher**: periodic polling
 
 Current models:
 

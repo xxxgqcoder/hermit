@@ -12,7 +12,7 @@ Hermit 是一个**自包含、纯本地运行的语义检索服务**，用于把
 - **多 collection 支持**：一个目录对应一个 collection
 - **混合检索**：dense + sparse 双路召回
 - **重排**：使用 cross-encoder 对融合后的候选结果进行 rerank
-- **增量同步**：启动时扫描，运行时监听文件变化
+- **增量同步**：启动时扫描，运行时定期轮询检测变化
 - **CPU 友好**：基于 `fastembed` + ONNX Runtime，无需 GPU
 
 ## 适用场景
@@ -46,7 +46,7 @@ Hermit 的搜索流程如下：
 3. 文本分块
 4. 生成向量
 5. 写入 Qdrant
-6. 持续文件监听
+6. 定期轮询检测
 
 ### 默认参数
 
@@ -55,7 +55,7 @@ Hermit 的搜索流程如下：
 - 搜索 `top_k`: `5`
 - 默认 `w_dense`: `0.7`
 - 默认 `w_sparse`: `0.3`
-- 默认 rerank candidates: `30`
+- 默认 rerank candidates: `50`
 - collection 数量上限: `4`
 - collection 名称最大长度: `64`
 - 默认端口: `8000`
@@ -66,7 +66,7 @@ Hermit 的搜索流程如下：
 - **向量数据库**: Qdrant embedded mode
 - **推理后端**: fastembed
 - **元数据存储**: SQLite
-- **文件监听**: watchdog
+- **文件监听**: 定期轮询 (Polling)
 
 当前使用的模型：
 
