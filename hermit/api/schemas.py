@@ -1,0 +1,52 @@
+from pydantic import BaseModel, Field
+
+from hermit.config import (
+    DEFAULT_CHUNK_OVERLAP,
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_RERANK_CANDIDATES,
+    DEFAULT_TOP_K,
+    DEFAULT_W_DENSE,
+    DEFAULT_W_SPARSE,
+)
+
+
+class SearchRequest(BaseModel):
+    query: str
+    collection: str
+    top_k: int = DEFAULT_TOP_K
+    w_dense: float = Field(DEFAULT_W_DENSE, ge=0, le=1)
+    w_sparse: float = Field(DEFAULT_W_SPARSE, ge=0, le=1)
+    rerank_candidates: int = DEFAULT_RERANK_CANDIDATES
+
+
+class SearchResult(BaseModel):
+    text: str
+    source_file: str
+    chunk_index: int
+    total_chunks: int
+    score: float | None = None
+
+
+class SearchResponse(BaseModel):
+    results: list[SearchResult]
+
+
+class CreateCollectionRequest(BaseModel):
+    name: str
+    folder_path: str
+    chunk_size: int = DEFAULT_CHUNK_SIZE
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP
+
+
+class CollectionStatus(BaseModel):
+    name: str
+    folder_path: str
+    indexed_files: int
+    total_chunks: int
+    watching: bool
+
+
+class SyncResponse(BaseModel):
+    added: int
+    updated: int
+    deleted: int

@@ -1,0 +1,16 @@
+[project]
+name = "hermit"
+version = "0.1.0"
+description = "Self-contained local semantic search service"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "qdrant-client>=1.13",
+    "fastembed>=0.6",
+    "watchdog>=6",
+]
+
+[tool.setuptools.packages.find]
+include = ["hermit*"]
