@@ -27,12 +27,12 @@ def test_registry_round_trip(tmp_data_root):
 
     assert get_all() == {}
 
-    register("col1", "/tmp/docs", 512, 64)
+    register("col1", "/tmp/docs")
     all_ = get_all()
     assert "col1" in all_
     assert all_["col1"]["folder_path"] == "/tmp/docs"
 
-    register("col2", "/tmp/other", 256, 32)
+    register("col2", "/tmp/other")
     assert len(get_all()) == 2
 
     unregister("col1")
@@ -201,7 +201,7 @@ def test_task_queue_dedup():
     q._worker = threading.Thread()  # fake alive check
     q._worker.start = lambda: None
 
-    task = IndexTask("col", "/tmp/a.md", 512, 64)
+    task = IndexTask("col", "/tmp/a.md")
     # Manually add to pending to simulate enqueue without worker
     q._pending.add((task.collection_name, task.file_path))
     assert q.enqueue(task) is False  # should reject duplicate
@@ -249,7 +249,7 @@ def test_tasks_endpoint_404(client):
 def test_tasks_endpoint_ok(mock_status, client):
     from hermit.api.routes import _collections
 
-    _collections["demo"] = {"folder_path": "/tmp", "chunk_size": 512, "chunk_overlap": 64}
+    _collections["demo"] = {"folder_path": "/tmp"}
     mock_status.return_value = {
         "collection": "demo",
         "pending_tasks": 3,

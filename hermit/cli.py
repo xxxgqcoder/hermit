@@ -30,8 +30,6 @@ import urllib.error
 import urllib.request
 
 from hermit.config import (
-    DEFAULT_CHUNK_OVERLAP,
-    DEFAULT_CHUNK_SIZE,
     DEFAULT_RERANK_CANDIDATES,
     DEFAULT_TOP_K,
     HERMIT_HOME,
@@ -261,7 +259,7 @@ def cmd_kb_add(args):
         _error(f"'{folder}' is not a directory")
 
     try:
-        register(args.name, str(folder), args.chunk_size, args.chunk_overlap)
+        register(args.name, str(folder))
     except ValueError as e:
         _error(str(e))
 
@@ -345,10 +343,6 @@ def main():
     kb_add = kb_sub.add_parser("add", help="Add a knowledge base directory")
     kb_add.add_argument("name", help="Collection alias")
     kb_add.add_argument("dir", help="Path to the directory")
-    kb_add.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE,
-                        help=f"Chunk size in characters (default: {DEFAULT_CHUNK_SIZE})")
-    kb_add.add_argument("--chunk-overlap", type=int, default=DEFAULT_CHUNK_OVERLAP,
-                        help=f"Chunk overlap in characters (default: {DEFAULT_CHUNK_OVERLAP})")
 
     kb_rm = kb_sub.add_parser("remove", help="Remove a knowledge base")
     kb_rm.add_argument("name", help="Collection name")

@@ -14,8 +14,6 @@ logger = logging.getLogger(__name__)
 class IndexTask:
     collection_name: str
     file_path: str
-    chunk_size: int
-    chunk_overlap: int
 
 
 class _IndexTaskQueue:
@@ -92,8 +90,6 @@ class _IndexTaskQueue:
             task.collection_name,
             file_path,
             meta,
-            chunk_size=task.chunk_size,
-            chunk_overlap=task.chunk_overlap,
         )
         if ok:
             logger.info("Indexed by background task: %s", task.file_path)
@@ -109,15 +105,11 @@ def start_task_worker():
 def enqueue_index_task(
     collection_name: str,
     file_path: str,
-    chunk_size: int,
-    chunk_overlap: int,
 ) -> bool:
     return _QUEUE.enqueue(
         IndexTask(
             collection_name=collection_name,
             file_path=file_path,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
         )
     )
 

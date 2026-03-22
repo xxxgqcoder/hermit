@@ -134,13 +134,12 @@ class TestRebuildCollection:
         mock_meta_cls.return_value = mock_meta_instance
         mock_scan.return_value = {"added": 3, "updated": 0, "deleted": 0}
 
-        result = rebuild_collection("test_col", "/tmp/docs", chunk_size=256, chunk_overlap=32)
+        result = rebuild_collection("test_col", "/tmp/docs")
 
         mock_qdrant.delete_collection.assert_called_once_with("test_col")
         mock_meta_instance.destroy.assert_called_once()
         mock_scan.assert_called_once_with(
             "test_col", "/tmp/docs",
-            chunk_size=256, chunk_overlap=32,
             defer_indexing=True,
         )
         assert result == {"added": 3, "updated": 0, "deleted": 0}

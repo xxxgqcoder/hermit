@@ -20,7 +20,7 @@ def _save(data: dict[str, dict]):
     _REGISTRY_PATH.write_text(json.dumps(data, indent=2))
 
 
-def register(name: str, folder_path: str, chunk_size: int, chunk_overlap: int):
+def register(name: str, folder_path: str):
     if not name:
         raise ValueError("Collection name must not be empty")
     if len(name) > MAX_COLLECTION_NAME_LENGTH:
@@ -44,8 +44,6 @@ def register(name: str, folder_path: str, chunk_size: int, chunk_overlap: int):
             )
     data[name] = {
         "folder_path": folder_path,
-        "chunk_size": chunk_size,
-        "chunk_overlap": chunk_overlap,
     }
     _save(data)
 

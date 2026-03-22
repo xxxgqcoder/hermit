@@ -17,11 +17,9 @@ class _Handler(FileSystemEventHandler):
     the scan after 2 seconds of quiet.
     """
 
-    def __init__(self, collection_name: str, folder_path: str, chunk_size: int, chunk_overlap: int):
+    def __init__(self, collection_name: str, folder_path: str):
         self.collection_name = collection_name
         self.folder_path = folder_path
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
         self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
 
@@ -39,8 +37,6 @@ class _Handler(FileSystemEventHandler):
             stats = scan_folder(
                 self.collection_name,
                 self.folder_path,
-                chunk_size=self.chunk_size,
-                chunk_overlap=self.chunk_overlap,
                 defer_indexing=True,
             )
             logger.info("Watcher rescan done: %s", stats)
@@ -56,12 +52,12 @@ class _Handler(FileSystemEventHandler):
 _observers: dict[str, Observer] = {}
 
 
-def start_watching(collection_name: str, folder_path: str, chunk_size: int = 512, chunk_overlap: int = 64):
+def start_watching(collection_name: str, folder_path: str):
     """Start watching a folder for changes."""
     if collection_name in _observers:
         return  # Already watching
 
-    handler = _Handler(collection_name, folder_path, chunk_size, chunk_overlap)
+    handler = _Handler(collection_name, folder_path)
     observer = Observer()
     observer.schedule(handler, folder_path, recursive=True)
     observer.daemon = True

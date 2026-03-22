@@ -36,8 +36,6 @@ def _index_file(
     collection_name: str,
     file_path: Path,
     meta: MetadataStore,
-    chunk_size: int,
-    chunk_overlap: int,
 ) -> bool:
     """Read, chunk, embed, and upsert a single file. Returns True on success."""
     fpath_str = str(file_path)
@@ -48,7 +46,7 @@ def _index_file(
         logger.warning("Failed to read %s: %s", fpath_str, e)
         return False
 
-    chunks = chunk_text(text, chunk_size=chunk_size, overlap=chunk_overlap)
+    chunks = chunk_text(text)
     if not chunks:
         return False
 
@@ -87,8 +85,6 @@ def _index_file(
 def scan_folder(
     collection_name: str,
     folder_path: str,
-    chunk_size: int = 512,
-    chunk_overlap: int = 64,
     defer_indexing: bool = True,
 ) -> dict:
     """Scan folder and sync index with three-way diff. Returns stats.
@@ -126,10 +122,10 @@ def scan_folder(
     # --- Handle new files: on disk but not indexed ---
     for fpath_str in sorted(to_add):
         if defer_indexing:
-            if enqueue_index_task(collection_name, fpath_str, chunk_size, chunk_overlap):
+            if enqueue_index_task(collection_name, fpath_str):
                 added += 1
         else:
-            if _index_file(collection_name, Path(fpath_str), meta, chunk_size, chunk_overlap):
+            if _index_file(collection_name, Path(fpath_str), meta):
                 added += 1
 
     # --- Handle existing: check hash for changes ---
@@ -139,10 +135,10 @@ def scan_folder(
         if current_hash == old_hash:
             continue
         if defer_indexing:
-            if enqueue_index_task(collection_name, fpath_str, chunk_size, chunk_overlap):
+            if enqueue_index_task(collection_name, fpath_str):
                 updated += 1
         else:
-            if _index_file(collection_name, Path(fpath_str), meta, chunk_size, chunk_overlap):
+            if _index_file(collection_name, Path(fpath_str), meta):
                 updated += 1
 
     return {"added": added, "updated": updated, "deleted": deleted}
@@ -151,8 +147,6 @@ def scan_folder(
 def rebuild_collection(
     collection_name: str,
     folder_path: str,
-    chunk_size: int = 512,
-    chunk_overlap: int = 64,
 ):
     """Drop and recreate a collection, then re-index all files via task queue."""
     logger.info("Rebuilding index for collection '%s'...", collection_name)
@@ -161,7 +155,5 @@ def rebuild_collection(
     return scan_folder(
         collection_name,
         folder_path,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
         defer_indexing=True,
     )

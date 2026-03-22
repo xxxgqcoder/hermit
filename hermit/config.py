@@ -19,9 +19,9 @@ LOG_DIR = HERMIT_HOME / "logs"
 # PID file for daemon management
 PID_FILE = HERMIT_HOME / "hermit.pid"
 
-# Default chunking parameters
-DEFAULT_CHUNK_SIZE = 512
-DEFAULT_CHUNK_OVERLAP = 64
+# Default chunking parameters (token-based, using embedding model tokenizer)
+DEFAULT_CHUNK_TOKENS = 256
+DEFAULT_CHUNK_OVERLAP_TOKENS = 32
 
 # Default search parameters
 DEFAULT_TOP_K = 5

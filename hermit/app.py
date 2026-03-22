@@ -72,20 +72,16 @@ async def lifespan(app: FastAPI):
                 rebuild_collection(
                     name,
                     cfg["folder_path"],
-                    chunk_size=cfg.get("chunk_size", 512),
-                    chunk_overlap=cfg.get("chunk_overlap", 64),
                 )
             else:
                 stats = scan_folder(
                     name,
                     cfg["folder_path"],
-                    chunk_size=cfg.get("chunk_size", 512),
-                    chunk_overlap=cfg.get("chunk_overlap", 64),
                     defer_indexing=True,
                 )
                 logger.info("Startup scan for '%s': %s", name, stats)
 
-            start_watching(name, cfg["folder_path"], cfg.get("chunk_size", 512), cfg.get("chunk_overlap", 64))
+            start_watching(name, cfg["folder_path"])
             _collections[name] = cfg
         except Exception:
             logger.exception("Failed to restore collection '%s'", name)
