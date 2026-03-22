@@ -3,6 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Hermit: local models and data
+/models/
+/data/
+/documents/
+
 # C extensions
 *.so
 
