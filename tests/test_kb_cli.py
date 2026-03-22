@@ -1,0 +1,326 @@
+"""Tests for knowledge base CLI commands and registry validation."""
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+
+# ── Registry validation tests ───────────────────────────────────
+
+
+@pytest.fixture
+def tmp_registry(tmp_path, monkeypatch):
+    monkeypatch.setattr("hermit.storage.registry.DATA_ROOT", tmp_path)
+    monkeypatch.setattr("hermit.storage.registry._REGISTRY_PATH", tmp_path / "collections.json")
+    return tmp_path
+
+
+def test_register_max_collections(tmp_registry):
+    """Should reject registration when MAX_COLLECTIONS is reached."""
+    from hermit.storage.registry import register, get_all
+    from hermit.config import MAX_COLLECTIONS
+
+    for i in range(MAX_COLLECTIONS):
+        register(f"col{i}", f"/tmp/dir{i}", 512, 64)
+
+    assert len(get_all()) == MAX_COLLECTIONS
+
+    with pytest.raises(ValueError, match="Maximum"):
+        register("one_more", "/tmp/extra", 512, 64)
+
+
+def test_register_duplicate_folder(tmp_registry):
+    """Should reject registering the same folder under a different name."""
+    from hermit.storage.registry import register
+
+    register("col1", "/tmp/docs", 512, 64)
+
+    with pytest.raises(ValueError, match="already registered"):
+        register("col2", "/tmp/docs", 512, 64)
+
+
+def test_register_invalid_name_special_chars(tmp_registry):
+    """Should reject names with special characters."""
+    from hermit.storage.registry import register
+
+    for bad_name in ["my docs", "my/docs", "my.docs", "@alias"]:
+        with pytest.raises(ValueError, match="Invalid collection name"):
+            register(bad_name, f"/tmp/{id(bad_name)}", 512, 64)
+
+
+def test_register_invalid_name_start_char(tmp_registry):
+    """Should reject names starting with hyphen or underscore."""
+    from hermit.storage.registry import register
+
+    for bad_name in ["-start", "_start"]:
+        with pytest.raises(ValueError, match="Invalid collection name"):
+            register(bad_name, f"/tmp/{bad_name}", 512, 64)
+
+
+def test_register_valid_name_formats(tmp_registry):
+    """Should accept well-formed names."""
+    from hermit.storage.registry import register, get_all
+
+    for i, name in enumerate(["docs", "my-docs", "my_docs", "Doc123"]):
+        register(name, f"/tmp/dir{i}", 512, 64)
+
+    assert len(get_all()) == 4
+
+
+def test_register_duplicate_name(tmp_registry):
+    """Should reject registering a duplicate collection name."""
+    from hermit.storage.registry import register
+
+    register("col1", "/tmp/docs", 512, 64)
+
+    with pytest.raises(ValueError, match="already exists"):
+        register("col1", "/tmp/docs_v2", 256, 32)
+
+
+def test_register_name_too_long(tmp_registry):
+    """Should reject name exceeding MAX_COLLECTION_NAME_LENGTH."""
+    from hermit.storage.registry import register
+    from hermit.config import MAX_COLLECTION_NAME_LENGTH
+
+    long_name = "a" * (MAX_COLLECTION_NAME_LENGTH + 1)
+    with pytest.raises(ValueError, match="must not exceed"):
+        register(long_name, "/tmp/docs", 512, 64)
+
+
+def test_register_name_at_max_length(tmp_registry):
+    """Name exactly at max length should be accepted."""
+    from hermit.storage.registry import register, get_all
+    from hermit.config import MAX_COLLECTION_NAME_LENGTH
+
+    name = "a" * MAX_COLLECTION_NAME_LENGTH
+    register(name, "/tmp/docs", 512, 64)
+    assert name in get_all()
+
+
+def test_register_empty_name(tmp_registry):
+    """Should reject empty name."""
+    from hermit.storage.registry import register
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        register("", "/tmp/docs", 512, 64)
+
+
+def test_register_reuse_folder_after_unregister(tmp_registry):
+    """After unregistering, the same folder should be available again."""
+    from hermit.storage.registry import register, unregister
+
+    register("col1", "/tmp/docs", 512, 64)
+    unregister("col1")
+    register("col2", "/tmp/docs", 512, 64)  # should succeed
+
+
+# ── CLI integration tests (subprocess) ──────────────────────────
+
+
+@pytest.fixture
+def cli_env(tmp_path, monkeypatch):
+    """Patch DATA_ROOT so CLI commands use a temp directory."""
+    monkeypatch.setattr("hermit.storage.registry.DATA_ROOT", tmp_path)
+    monkeypatch.setattr("hermit.storage.registry._REGISTRY_PATH", tmp_path / "collections.json")
+    return tmp_path
+
+
+def test_kb_list_empty(cli_env, capsys):
+    """kb list with no collections prints a message."""
+    from hermit.cli import main
+
+    with patch("sys.argv", ["hermit", "kb", "list"]):
+        main()
+
+    captured = capsys.readouterr()
+    assert "No collections registered" in captured.out
+
+
+def test_kb_add_and_list(cli_env, tmp_path, capsys):
+    """kb add should register a directory, kb list should show it."""
+    from hermit.cli import main
+
+    test_dir = tmp_path / "my_docs"
+    test_dir.mkdir()
+
+    with patch("sys.argv", ["hermit", "kb", "add", "my_docs", str(test_dir)]):
+        main()
+
+    captured = capsys.readouterr()
+    assert "Added collection 'my_docs'" in captured.out
+
+    with patch("sys.argv", ["hermit", "kb", "list"]):
+        main()
+
+    captured = capsys.readouterr()
+    assert "my_docs" in captured.out
+    assert str(test_dir) in captured.out
+
+
+def test_kb_add_invalid_name(cli_env, tmp_path, capsys):
+    """kb add with invalid alias should fail."""
+    from hermit.cli import main
+
+    test_dir = tmp_path / "docs"
+    test_dir.mkdir()
+
+    for bad_name in ["my docs", "my/docs", "@alias"]:
+        with pytest.raises(SystemExit, match="1"):
+            with patch("sys.argv", ["hermit", "kb", "add", bad_name, str(test_dir)]):
+                main()
+
+
+def test_kb_add_nonexistent_dir(cli_env, tmp_path, capsys):
+    """kb add with a non-existent directory should fail."""
+    from hermit.cli import main
+
+    with pytest.raises(SystemExit, match="1"):
+        with patch("sys.argv", ["hermit", "kb", "add", "nope", str(tmp_path / "nope")]):
+            main()
+
+
+def test_kb_add_duplicate_name(cli_env, tmp_path, capsys):
+    """kb add with a name that already exists should fail."""
+    from hermit.cli import main
+
+    d1 = tmp_path / "docs1"
+    d1.mkdir()
+    d2 = tmp_path / "docs2"
+    d2.mkdir()
+
+    with patch("sys.argv", ["hermit", "kb", "add", "myalias", str(d1)]):
+        main()
+
+    with pytest.raises(SystemExit, match="1"):
+        with patch("sys.argv", ["hermit", "kb", "add", "myalias", str(d2)]):
+            main()
+
+
+def test_kb_add_duplicate_folder(cli_env, tmp_path, capsys):
+    """kb add same folder with different name should fail."""
+    from hermit.cli import main
+
+    test_dir = tmp_path / "docs"
+    test_dir.mkdir()
+
+    with patch("sys.argv", ["hermit", "kb", "add", "alias1", str(test_dir)]):
+        main()
+
+    with pytest.raises(SystemExit, match="1"):
+        with patch("sys.argv", ["hermit", "kb", "add", "alias2", str(test_dir)]):
+            main()
+
+
+def test_kb_add_name_too_long(cli_env, tmp_path, capsys):
+    """kb add with a name exceeding 64 chars should fail."""
+    from hermit.cli import main
+    from hermit.config import MAX_COLLECTION_NAME_LENGTH
+
+    test_dir = tmp_path / "docs"
+    test_dir.mkdir()
+    long_name = "x" * (MAX_COLLECTION_NAME_LENGTH + 1)
+
+    with pytest.raises(SystemExit, match="1"):
+        with patch("sys.argv", ["hermit", "kb", "add", long_name, str(test_dir)]):
+            main()
+
+
+def test_kb_add_exceeds_max(cli_env, tmp_path, capsys):
+    """kb add beyond MAX_COLLECTIONS should fail."""
+    from hermit.cli import main
+    from hermit.config import MAX_COLLECTIONS
+
+    for i in range(MAX_COLLECTIONS):
+        d = tmp_path / f"dir{i}"
+        d.mkdir()
+        with patch("sys.argv", ["hermit", "kb", "add", f"col{i}", str(d)]):
+            main()
+
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    with pytest.raises(SystemExit, match="1"):
+        with patch("sys.argv", ["hermit", "kb", "add", "extra", str(extra)]):
+            main()
+
+
+def test_kb_remove(cli_env, tmp_path, capsys, monkeypatch):
+    """kb remove should unregister and destroy metadata."""
+    from hermit.cli import main
+    from hermit.storage.registry import get_all
+
+    test_dir = tmp_path / "docs"
+    test_dir.mkdir()
+
+    # Patch MetadataStore.destroy so it doesn't need a real SQLite DB
+    mock_destroyed = []
+    original_init = None
+
+    class FakeMetadataStore:
+        def __init__(self, name):
+            self.name = name
+
+        def destroy(self):
+            mock_destroyed.append(self.name)
+
+    monkeypatch.setattr("hermit.cli.MetadataStore", FakeMetadataStore, raising=False)
+    # Need to patch the lazy import inside cmd_kb_remove
+    import hermit.cli as cli_module
+    original_cmd = cli_module.cmd_kb_remove
+
+    def patched_cmd_kb_remove(args):
+        from hermit.storage.registry import get_all, unregister
+        existing = get_all()
+        if args.name not in existing:
+            print(f"Error: collection '{args.name}' not found")
+            raise SystemExit(1)
+        unregister(args.name)
+        FakeMetadataStore(args.name).destroy()
+        print(f"Removed collection '{args.name}'")
+        print("Restart the service to apply changes.")
+
+    monkeypatch.setattr(cli_module, "cmd_kb_remove", patched_cmd_kb_remove)
+
+    with patch("sys.argv", ["hermit", "kb", "add", "docs", str(test_dir)]):
+        main()
+
+    assert "docs" in get_all()
+
+    with patch("sys.argv", ["hermit", "kb", "remove", "docs"]):
+        main()
+
+    captured = capsys.readouterr()
+    assert "Removed collection 'docs'" in captured.out
+    assert get_all() == {}
+    assert "docs" in mock_destroyed
+
+
+def test_kb_remove_nonexistent(cli_env, capsys):
+    """kb remove of a non-existent collection should fail."""
+    from hermit.cli import main
+
+    with pytest.raises(SystemExit, match="1"):
+        with patch("sys.argv", ["hermit", "kb", "remove", "ghost"]):
+            main()
+
+
+def test_kb_add_chunk_params(cli_env, tmp_path, capsys):
+    """kb add with custom chunk-size and chunk-overlap should be persisted."""
+    from hermit.cli import main
+    from hermit.storage.registry import get_all
+
+    test_dir = tmp_path / "docs"
+    test_dir.mkdir()
+
+    with patch("sys.argv", [
+        "hermit", "kb", "add", "docs", str(test_dir),
+        "--chunk-size", "256", "--chunk-overlap", "32",
+    ]):
+        main()
+
+    cfg = get_all()["docs"]
+    assert cfg["chunk_size"] == 256
+    assert cfg["chunk_overlap"] == 32

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 # Project root: directory containing main.py
@@ -26,6 +27,11 @@ SPARSE_MODEL = "Qdrant/bm25"
 
 # Reranker model
 RERANKER_MODEL = "jinaai/jina-reranker-v2-base-multilingual"
+
+# Maximum number of knowledge base collections
+MAX_COLLECTIONS = 4
+MAX_COLLECTION_NAME_LENGTH = 64
+COLLECTION_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 
 # FastAPI
 HOST = "0.0.0.0"

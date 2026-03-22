@@ -31,13 +31,6 @@ class SearchResponse(BaseModel):
     results: list[SearchResult]
 
 
-class CreateCollectionRequest(BaseModel):
-    name: str
-    folder_path: str
-    chunk_size: int = DEFAULT_CHUNK_SIZE
-    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP
-
-
 class CollectionStatus(BaseModel):
     name: str
     folder_path: str

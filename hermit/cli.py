@@ -4,6 +4,9 @@ Usage:
     hermit download              # download all models (resumes interrupted)
     hermit download --force      # force re-download
     hermit download --skip-verify
+    hermit kb add <name> <dir>   # add a knowledge base directory
+    hermit kb remove <name>      # remove a knowledge base
+    hermit kb list               # list all knowledge bases
 """
 
 import argparse
@@ -13,6 +16,8 @@ import time
 from huggingface_hub import snapshot_download
 
 from hermit.config import (
+    DEFAULT_CHUNK_OVERLAP,
+    DEFAULT_CHUNK_SIZE,
     DENSE_DIM,
     DENSE_MODEL,
     MODEL_ROOT,
@@ -119,6 +124,55 @@ def cmd_download(args):
         verify_models()
 
 
+# ── Knowledge base management ───────────────────────────────────
+
+
+def cmd_kb_add(args):
+    from pathlib import Path
+    from hermit.storage.registry import register
+
+    folder = Path(args.dir).resolve()
+    if not folder.is_dir():
+        print(f"Error: '{folder}' is not a directory")
+        raise SystemExit(1)
+
+    try:
+        register(args.name, str(folder), args.chunk_size, args.chunk_overlap)
+    except ValueError as e:
+        print(f"Error: {e}")
+        raise SystemExit(1)
+
+    print(f"Added collection '{args.name}' → {folder}")
+    print("Restart the service to apply changes.")
+
+
+def cmd_kb_remove(args):
+    from hermit.storage.registry import get_all, unregister
+    from hermit.storage.metadata import MetadataStore
+
+    existing = get_all()
+    if args.name not in existing:
+        print(f"Error: collection '{args.name}' not found")
+        raise SystemExit(1)
+
+    unregister(args.name)
+    MetadataStore(args.name).destroy()
+    print(f"Removed collection '{args.name}'")
+    print("Restart the service to apply changes.")
+
+
+def cmd_kb_list(_args):
+    from hermit.storage.registry import get_all
+
+    collections = get_all()
+    if not collections:
+        print("No collections registered.")
+        return
+
+    for name, cfg in collections.items():
+        print(f"  {name}: {cfg['folder_path']}")
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -132,9 +186,39 @@ def main():
     dl.add_argument("--force", action="store_true", help="Force re-download")
     dl.add_argument("--skip-verify", action="store_true", help="Skip model verification")
 
+    # kb subcommand
+    kb = sub.add_parser("kb", help="Manage knowledge base collections")
+    kb_sub = kb.add_subparsers(dest="kb_command")
+
+    kb_add = kb_sub.add_parser("add", help="Add a knowledge base directory")
+    kb_add.add_argument("name", help="Collection alias (max 64 chars, must be unique)")
+    kb_add.add_argument("dir", help="Path to the directory")
+    kb_add.add_argument(
+        "--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE,
+        help=f"Chunk size in characters (default: {DEFAULT_CHUNK_SIZE})",
+    )
+    kb_add.add_argument(
+        "--chunk-overlap", type=int, default=DEFAULT_CHUNK_OVERLAP,
+        help=f"Chunk overlap in characters (default: {DEFAULT_CHUNK_OVERLAP})",
+    )
+
+    kb_rm = kb_sub.add_parser("remove", help="Remove a knowledge base")
+    kb_rm.add_argument("name", help="Collection name")
+
+    kb_sub.add_parser("list", help="List all knowledge bases")
+
     args = parser.parse_args()
     if args.command == "download":
         cmd_download(args)
+    elif args.command == "kb":
+        if args.kb_command == "add":
+            cmd_kb_add(args)
+        elif args.kb_command == "remove":
+            cmd_kb_remove(args)
+        elif args.kb_command == "list":
+            cmd_kb_list(args)
+        else:
+            kb.print_help()
     else:
         parser.print_help()
 
