@@ -99,7 +99,7 @@ hermit search <collection> "<query>"
 | `collection` | str | — | Collection 名称 |
 | `query` | str | — | 搜索查询 |
 | `--top-k` | int | 5 | 返回结果数 |
-| `--rerank-candidates` | int | 30 | 精排候选池大小 |
+| `--rerank-candidates` | int | 50 | 精排候选池大小 |
 
 示例：
 

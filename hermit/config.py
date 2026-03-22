@@ -27,7 +27,7 @@ DEFAULT_CHUNK_OVERLAP_TOKENS = 32
 DEFAULT_TOP_K = 5
 DEFAULT_W_DENSE = 0.7
 DEFAULT_W_SPARSE = 0.3
-DEFAULT_RERANK_CANDIDATES = 30
+DEFAULT_RERANK_CANDIDATES = 50
 
 # Embedding models (fastembed-supported)
 DENSE_MODEL = "jinaai/jina-embeddings-v2-base-zh"
