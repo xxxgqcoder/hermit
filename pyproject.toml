@@ -12,5 +12,8 @@ dependencies = [
     "watchdog>=6",
 ]
 
+[project.scripts]
+hermit = "hermit.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["hermit*"]
