@@ -1,6 +1,10 @@
 """Hermit CLI — deployment & management commands.
 
 Usage:
+    hermit start                 # start the server in background
+    hermit stop                  # stop the running server
+    hermit status                # show server status
+    hermit logs                  # tail server logs
     hermit download              # download all models (resumes interrupted)
     hermit download --force      # force re-download
     hermit download --skip-verify
@@ -11,115 +15,205 @@ Usage:
 
 import argparse
 import logging
+import os
+import signal
+import socket
+import subprocess
+import sys
 import time
-
-from huggingface_hub import snapshot_download
+import urllib.request
+import urllib.error
+import json
 
 from hermit.config import (
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,
-    DENSE_DIM,
-    DENSE_MODEL,
-    MODEL_ROOT,
-    RERANKER_MODEL,
-    SPARSE_MODEL,
+    HERMIT_HOME,
+    HOST,
+    LOG_DIR,
+    PID_FILE,
+    PORT,
 )
 
 logger = logging.getLogger(__name__)
 
-# ── Model registry ──────────────────────────────────────────────
-MODELS = [
-    {
-        "repo_id": DENSE_MODEL,
-        "description": f"Dense embedding ({DENSE_DIM}-dim, Chinese-English)",
-        "allow_patterns": [
-            "onnx/model.onnx",
-            "config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-        ],
-    },
-    {
-        "repo_id": SPARSE_MODEL,
-        "description": "Sparse embedding (BM25)",
-        "allow_patterns": None,  # small model, download everything
-    },
-    {
-        "repo_id": RERANKER_MODEL,
-        "description": "Reranker (multilingual cross-encoder)",
-        "allow_patterns": [
-            "onnx/model.onnx",
-            "config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-        ],
-    },
-]
 
-MAX_RETRIES = 5
-RETRY_DELAY = 3  # seconds
+# ── Helper utilities ────────────────────────────────────────────
 
 
-def download_model(repo_id: str, allow_patterns: list[str] | None, force: bool) -> str:
-    """Download a single model with retry logic. Returns snapshot path."""
-    for attempt in range(1, MAX_RETRIES + 1):
+def _read_pid() -> int | None:
+    """Read PID from file, return None if missing or stale."""
+    if not PID_FILE.exists():
+        return None
+    try:
+        pid = int(PID_FILE.read_text().strip())
+        os.kill(pid, 0)  # check if process is alive
+        return pid
+    except (ValueError, ProcessLookupError, PermissionError):
+        PID_FILE.unlink(missing_ok=True)
+        return None
+
+
+def _is_port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _health_check() -> dict | None:
+    """Query the /health endpoint, return parsed JSON or None."""
+    try:
+        url = f"http://127.0.0.1:{PORT}/health"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
+
+# ── Server commands ─────────────────────────────────────────────
+
+
+def cmd_start(_args):
+    pid = _read_pid()
+    if pid is not None:
+        print(f"Hermit is already running (PID {pid}).")
+        raise SystemExit(0)
+
+    if _is_port_in_use(PORT):
+        print(f"Error: port {PORT} is already in use.")
+        raise SystemExit(1)
+
+    # Ensure directories exist
+    HERMIT_HOME.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    log_file = LOG_DIR / "hermit.log"
+
+    # Spawn uvicorn as a detached process
+    with open(log_file, "a") as lf:
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-m", "uvicorn",
+                "hermit.app:app",
+                "--host", HOST,
+                "--port", str(PORT),
+            ],
+            stdout=lf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(proc.pid))
+
+    print(f"Hermit starting (PID {proc.pid})...")
+    print(f"  Log: {log_file}")
+    print(f"  Home: {HERMIT_HOME}")
+
+    # Wait for server to become ready (up to 120s for model downloads)
+    for i in range(120):
+        time.sleep(1)
+        # Check process still alive
         try:
-            path = snapshot_download(
-                repo_id=repo_id,
-                cache_dir=str(MODEL_ROOT),
-                allow_patterns=allow_patterns,
-                force_download=force,
-            )
-            return path
-        except Exception as e:
-            if attempt == MAX_RETRIES:
-                raise
-            logger.warning(
-                "Attempt %d/%d for %s failed: %s — retrying in %ds",
-                attempt, MAX_RETRIES, repo_id, e, RETRY_DELAY,
-            )
-            time.sleep(RETRY_DELAY)
-    raise RuntimeError("unreachable")
+            os.kill(proc.pid, 0)
+        except ProcessLookupError:
+            print("Error: server process exited unexpectedly. Check logs:")
+            print(f"  {log_file}")
+            PID_FILE.unlink(missing_ok=True)
+            raise SystemExit(1)
+
+        health = _health_check()
+        if health and health.get("status") == "ready":
+            print(f"Hermit is ready at http://127.0.0.1:{PORT}")
+            return
+
+    print("Warning: server started but health check timed out.")
+    print("It may still be downloading models. Check status with: hermit status")
 
 
-def verify_models():
-    """Quick smoke test: load each model and run a dummy inference."""
-    from fastembed import SparseTextEmbedding, TextEmbedding
-    from fastembed.rerank.cross_encoder import TextCrossEncoder
+def cmd_stop(_args):
+    pid = _read_pid()
+    if pid is None:
+        print("Hermit is not running.")
+        return
 
-    logger.info("Verifying models...")
-    cache = str(MODEL_ROOT)
+    print(f"Stopping Hermit (PID {pid})...")
+    os.kill(pid, signal.SIGTERM)
 
-    dense = TextEmbedding(model_name=DENSE_MODEL, cache_dir=cache)
-    vec = list(dense.embed(["test"]))[0]
-    assert len(vec) == DENSE_DIM, f"Expected dim {DENSE_DIM}, got {len(vec)}"
-    logger.info("  Dense embedding OK (dim=%d)", len(vec))
+    # Wait for graceful shutdown (up to 10s)
+    for _ in range(10):
+        time.sleep(1)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            PID_FILE.unlink(missing_ok=True)
+            print("Hermit stopped.")
+            return
 
-    sparse = SparseTextEmbedding(model_name=SPARSE_MODEL, cache_dir=cache)
-    svec = list(sparse.embed(["test"]))[0]
-    logger.info("  Sparse embedding OK (indices=%d)", len(svec.indices))
+    # Force kill
+    print("Graceful shutdown timed out, sending SIGKILL...")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    PID_FILE.unlink(missing_ok=True)
+    print("Hermit killed.")
 
-    reranker = TextCrossEncoder(model_name=RERANKER_MODEL, cache_dir=cache)
-    scores = list(reranker.rerank("query", ["relevant doc", "irrelevant"]))
-    assert scores[0] > scores[1], f"Reranker scoring seems wrong: {scores}"
-    logger.info("  Reranker OK (scores=%s)", scores)
 
-    logger.info("All models verified.")
+def cmd_status(_args):
+    pid = _read_pid()
+    if pid is None:
+        print("Hermit is not running.")
+        return
+
+    print(f"Hermit is running (PID {pid})")
+
+    health = _health_check()
+    if health is None:
+        print("  Status: starting (not yet responding to health checks)")
+        return
+
+    status = health.get("status", "unknown")
+    uptime = health.get("uptime", 0)
+    mins, secs = divmod(int(uptime), 60)
+    hours, mins = divmod(mins, 60)
+    print(f"  Status: {status}")
+    print(f"  Uptime: {hours}h {mins}m {secs}s")
+    print(f"  Models loaded: {health.get('models_loaded', 'unknown')}")
+
+    collections = health.get("collections", [])
+    if collections:
+        print(f"  Collections ({len(collections)}):")
+        for c in collections:
+            print(f"    {c['name']}: {c['indexed_files']} files, {c['total_chunks']} chunks")
+    else:
+        print("  Collections: none")
+
+    pending = health.get("pending_index_tasks", 0)
+    if pending > 0:
+        print(f"  Indexing: {pending} tasks pending")
+
+
+def cmd_logs(_args):
+    log_file = LOG_DIR / "hermit.log"
+    if not log_file.exists():
+        print("No log file found.")
+        return
+
+    # Tail the log file using subprocess for cross-platform support
+    try:
+        subprocess.run(["tail", "-f", str(log_file)])
+    except KeyboardInterrupt:
+        pass
+
+
+# ── Download command ────────────────────────────────────────────
 
 
 def cmd_download(args):
-    MODEL_ROOT.mkdir(parents=True, exist_ok=True)
-    logger.info("Model cache: %s", MODEL_ROOT)
+    from hermit.models import download_all, verify_models
 
-    for m in MODELS:
-        logger.info("Downloading %s — %s", m["repo_id"], m["description"])
-        path = download_model(m["repo_id"], m["allow_patterns"], args.force)
-        logger.info("  -> %s", path)
-
-    logger.info("All downloads complete.")
-
+    download_all(force=args.force)
     if not args.skip_verify:
         verify_models()
 
@@ -182,6 +276,13 @@ def main():
     parser = argparse.ArgumentParser(prog="hermit", description="Hermit management CLI")
     sub = parser.add_subparsers(dest="command")
 
+    # Server lifecycle commands
+    sub.add_parser("start", help="Start the server in background")
+    sub.add_parser("stop", help="Stop the running server")
+    sub.add_parser("status", help="Show server status")
+    sub.add_parser("logs", help="Tail server logs")
+
+    # Model download
     dl = sub.add_parser("download", help="Download all required models")
     dl.add_argument("--force", action="store_true", help="Force re-download")
     dl.add_argument("--skip-verify", action="store_true", help="Skip model verification")
@@ -208,7 +309,15 @@ def main():
     kb_sub.add_parser("list", help="List all knowledge bases")
 
     args = parser.parse_args()
-    if args.command == "download":
+    if args.command == "start":
+        cmd_start(args)
+    elif args.command == "stop":
+        cmd_stop(args)
+    elif args.command == "status":
+        cmd_status(args)
+    elif args.command == "logs":
+        cmd_logs(args)
+    elif args.command == "download":
         cmd_download(args)
     elif args.command == "kb":
         if args.kb_command == "add":

@@ -51,3 +51,17 @@ class SyncResponse(BaseModel):
     added: int
     updated: int
     deleted: int
+
+
+class HealthCollectionInfo(BaseModel):
+    name: str
+    indexed_files: int
+    total_chunks: int
+
+
+class HealthResponse(BaseModel):
+    status: str  # "ready", "starting"
+    uptime: float
+    models_loaded: bool
+    collections: list[HealthCollectionInfo]
+    pending_index_tasks: int

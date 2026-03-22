@@ -1,14 +1,22 @@
+import os
 import re
 from pathlib import Path
 
-# Project root: directory containing main.py
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# ── HERMIT_HOME ─────────────────────────────────────────────────
+# Default: ~/.hermit/  — override with HERMIT_HOME env var
+HERMIT_HOME = Path(os.environ.get("HERMIT_HOME", Path.home() / ".hermit"))
 
 # Model storage
-MODEL_ROOT = PROJECT_ROOT / "models"
+MODEL_ROOT = HERMIT_HOME / "models"
 
 # Data storage (Qdrant + SQLite)
-DATA_ROOT = PROJECT_ROOT / "data"
+DATA_ROOT = HERMIT_HOME / "data"
+
+# Logs
+LOG_DIR = HERMIT_HOME / "logs"
+
+# PID file for daemon management
+PID_FILE = HERMIT_HOME / "hermit.pid"
 
 # Default chunking parameters
 DEFAULT_CHUNK_SIZE = 512
