@@ -1,9 +1,9 @@
 
 分层结构：
 
-1. **Ingestion 层**：文件夹扫描 + watchdog 监听 → 变更检测（SQLite）→ 文本切片 → 向量化 → 入库
+1. **Ingestion 层**：文件夹扫描 + 定期轮询 → 变更检测（SQLite）→ 文本切片 → 向量化 → 入库
 2. **检索层 (Recall)**：Dense + Sparse 双路召回，Qdrant RRF 融合
-3. **精排层 (Rerank)**：Cross-Encoder 处理 Top 20-30 候选集
+3. **精排层 (Rerank)**：Cross-Encoder 处理 Top 50 候选集
 4. **服务层**：FastAPI 暴露 OpenAPI 接口
 
 支持**多知识库**：每个文件夹 = 一个独立的 Qdrant collection。
@@ -34,7 +34,7 @@
 ### 触发方式
 
 - **启动时**：全量扫描，逐文件对比 hash 与 SQLite 记录，增量更新索引
-- **运行时**：watchdog 监听文件夹变更事件（2 秒防抖），触发全量 rescan
+- **运行时**：定期轮询扫描（默认每 15 分钟），检测文件变更并触发增量更新
 
 ### 变更检测（SQLite 元数据库）
 
@@ -60,12 +60,13 @@
 - 使用模型 tokenizer 计数，消除中英文字符密度差异
 - 短文本（≤ chunk_tokens）不做切分
 - 空文本跳过
+- **向量化增强**：Embedding 时会将文件名作为标题拼接到切片内容前，格式为 `[{title}]\n{chunk}`，以增强语义召回
 
 ### 索引流程
 
 1. 递归扫描文件夹（`rglob("*")`），逐文件对比 SHA256 与 SQLite 记录
 2. **新增/修改文件**：切片 → 向量化 → 按 `source_file` 删除旧 chunks → 插入新 chunks（UUID 作为 point ID）→ 更新 SQLite
-3. **删除文件**：按 `source_file` 删除 Qdrant 中对应 chunks → 删除 SQLite 记录
+3. 后台线程定期轮询执行扫描逻辑（Scanning Watcher中对应 chunks → 删除 SQLite 记录
 4. watchdog 监听到文件事件时执行全量 rescan 逻辑（防抖后）
 
 ---
@@ -77,7 +78,7 @@
 ### 向量配置
 
 | 向量名 | 维度 | 距离 | 说明 |
-|---|---|---|---|
+|---|---|---768 | Cosine | jina-embeddings-v2-base-zh
 | `dense` | 512 | Cosine | bge-small-zh-v1.5 语义向量 |
 | `sparse` | 可变 | Dot | BM25 稀疏词权重向量 |
 
@@ -85,6 +86,7 @@
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
+| `title` | string | 文件名（不含扩展名） |
 | `text` | string | 切片原文 |
 | `source_file` | string | 源文件绝对路径 |
 | `chunk_index` | int | 该切片在源文件中的位置（0-based） |
