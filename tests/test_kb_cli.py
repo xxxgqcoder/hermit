@@ -130,14 +130,17 @@ def cli_env(tmp_path, monkeypatch):
 
 
 def test_kb_list_empty(cli_env, capsys):
-    """kb list with no collections prints a message."""
+    """kb list with no collections returns empty JSON."""
     from hermit.cli import main
 
-    with patch("sys.argv", ["hermit", "kb", "list"]):
-        main()
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("sys.argv", ["hermit", "kb", "list"]):
+            main()
+    assert exc_info.value.code == 0
 
     captured = capsys.readouterr()
-    assert "No collections registered" in captured.out
+    data = json.loads(captured.out)
+    assert data["collections"] == {}
 
 
 def test_kb_add_and_list(cli_env, tmp_path, capsys):
@@ -147,18 +150,25 @@ def test_kb_add_and_list(cli_env, tmp_path, capsys):
     test_dir = tmp_path / "my_docs"
     test_dir.mkdir()
 
-    with patch("sys.argv", ["hermit", "kb", "add", "my_docs", str(test_dir)]):
-        main()
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("sys.argv", ["hermit", "kb", "add", "my_docs", str(test_dir)]):
+            main()
+    assert exc_info.value.code == 0
 
     captured = capsys.readouterr()
-    assert "Added collection 'my_docs'" in captured.out
+    data = json.loads(captured.out)
+    assert data["status"] == "added"
+    assert data["name"] == "my_docs"
 
-    with patch("sys.argv", ["hermit", "kb", "list"]):
-        main()
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("sys.argv", ["hermit", "kb", "list"]):
+            main()
+    assert exc_info.value.code == 0
 
     captured = capsys.readouterr()
-    assert "my_docs" in captured.out
-    assert str(test_dir) in captured.out
+    data = json.loads(captured.out)
+    assert "my_docs" in data["collections"]
+    assert data["collections"]["my_docs"]["folder_path"] == str(test_dir)
 
 
 def test_kb_add_invalid_name(cli_env, tmp_path, capsys):
@@ -192,12 +202,15 @@ def test_kb_add_duplicate_name(cli_env, tmp_path, capsys):
     d2 = tmp_path / "docs2"
     d2.mkdir()
 
-    with patch("sys.argv", ["hermit", "kb", "add", "myalias", str(d1)]):
-        main()
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("sys.argv", ["hermit", "kb", "add", "myalias", str(d1)]):
+            main()
+    assert exc_info.value.code == 0
 
-    with pytest.raises(SystemExit, match="1"):
+    with pytest.raises(SystemExit) as exc_info:
         with patch("sys.argv", ["hermit", "kb", "add", "myalias", str(d2)]):
             main()
+    assert exc_info.value.code == 1
 
 
 def test_kb_add_duplicate_folder(cli_env, tmp_path, capsys):
@@ -207,12 +220,15 @@ def test_kb_add_duplicate_folder(cli_env, tmp_path, capsys):
     test_dir = tmp_path / "docs"
     test_dir.mkdir()
 
-    with patch("sys.argv", ["hermit", "kb", "add", "alias1", str(test_dir)]):
-        main()
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("sys.argv", ["hermit", "kb", "add", "alias1", str(test_dir)]):
+            main()
+    assert exc_info.value.code == 0
 
-    with pytest.raises(SystemExit, match="1"):
+    with pytest.raises(SystemExit) as exc_info:
         with patch("sys.argv", ["hermit", "kb", "add", "alias2", str(test_dir)]):
             main()
+    assert exc_info.value.code == 1
 
 
 def test_kb_add_name_too_long(cli_env, tmp_path, capsys):
@@ -237,14 +253,17 @@ def test_kb_add_exceeds_max(cli_env, tmp_path, capsys):
     for i in range(MAX_COLLECTIONS):
         d = tmp_path / f"dir{i}"
         d.mkdir()
-        with patch("sys.argv", ["hermit", "kb", "add", f"col{i}", str(d)]):
-            main()
+        with pytest.raises(SystemExit) as exc_info:
+            with patch("sys.argv", ["hermit", "kb", "add", f"col{i}", str(d)]):
+                main()
+        assert exc_info.value.code == 0
 
     extra = tmp_path / "extra"
     extra.mkdir()
-    with pytest.raises(SystemExit, match="1"):
+    with pytest.raises(SystemExit) as exc_info:
         with patch("sys.argv", ["hermit", "kb", "add", "extra", str(extra)]):
             main()
+    assert exc_info.value.code == 1
 
 
 def test_kb_remove(cli_env, tmp_path, capsys, monkeypatch):
@@ -257,7 +276,6 @@ def test_kb_remove(cli_env, tmp_path, capsys, monkeypatch):
 
     # Patch MetadataStore.destroy so it doesn't need a real SQLite DB
     mock_destroyed = []
-    original_init = None
 
     class FakeMetadataStore:
         def __init__(self, name):
@@ -266,34 +284,23 @@ def test_kb_remove(cli_env, tmp_path, capsys, monkeypatch):
         def destroy(self):
             mock_destroyed.append(self.name)
 
-    monkeypatch.setattr("hermit.cli.MetadataStore", FakeMetadataStore, raising=False)
-    # Need to patch the lazy import inside cmd_kb_remove
-    import hermit.cli as cli_module
-    original_cmd = cli_module.cmd_kb_remove
+    monkeypatch.setattr("hermit.storage.metadata.MetadataStore", FakeMetadataStore)
 
-    def patched_cmd_kb_remove(args):
-        from hermit.storage.registry import get_all, unregister
-        existing = get_all()
-        if args.name not in existing:
-            print(f"Error: collection '{args.name}' not found")
-            raise SystemExit(1)
-        unregister(args.name)
-        FakeMetadataStore(args.name).destroy()
-        print(f"Removed collection '{args.name}'")
-        print("Restart the service to apply changes.")
-
-    monkeypatch.setattr(cli_module, "cmd_kb_remove", patched_cmd_kb_remove)
-
-    with patch("sys.argv", ["hermit", "kb", "add", "docs", str(test_dir)]):
-        main()
-
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("sys.argv", ["hermit", "kb", "add", "docs", str(test_dir)]):
+            main()
+    assert exc_info.value.code == 0
     assert "docs" in get_all()
 
-    with patch("sys.argv", ["hermit", "kb", "remove", "docs"]):
-        main()
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("sys.argv", ["hermit", "kb", "remove", "docs"]):
+            main()
+    assert exc_info.value.code == 0
 
     captured = capsys.readouterr()
-    assert "Removed collection 'docs'" in captured.out
+    data = json.loads(captured.out.strip().split("\n")[-1])
+    assert data["status"] == "removed"
+    assert data["name"] == "docs"
     assert get_all() == {}
     assert "docs" in mock_destroyed
 
@@ -315,11 +322,13 @@ def test_kb_add_chunk_params(cli_env, tmp_path, capsys):
     test_dir = tmp_path / "docs"
     test_dir.mkdir()
 
-    with patch("sys.argv", [
-        "hermit", "kb", "add", "docs", str(test_dir),
-        "--chunk-size", "256", "--chunk-overlap", "32",
-    ]):
-        main()
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("sys.argv", [
+            "hermit", "kb", "add", "docs", str(test_dir),
+            "--chunk-size", "256", "--chunk-overlap", "32",
+        ]):
+            main()
+    assert exc_info.value.code == 0
 
     cfg = get_all()["docs"]
     assert cfg["chunk_size"] == 256

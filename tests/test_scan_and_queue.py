@@ -235,7 +235,7 @@ def client():
     with patch("hermit.retrieval.embedder.warmup"), \
          patch("hermit.retrieval.reranker.warmup"), \
          patch("hermit.ingestion.task_queue.start_task_worker"):
-        from main import app
+        from hermit.app import app
         from fastapi.testclient import TestClient
         return TestClient(app)
 
