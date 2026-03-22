@@ -72,15 +72,20 @@ def scan_folder(
         # Delete old entries
         qdrant.delete_by_source_file(collection_name, fpath_str)
 
-        # Embed
-        dense_vectors = embedder.embed_dense(chunks)
-        sparse_vectors = embedder.embed_sparse(chunks)
+        # Prepend document title to each chunk for embedding
+        title = file_path.stem
+        embed_inputs = [f"[{title}]\n{chunk}" for chunk in chunks]
+
+        # Embed (title-augmented text for better retrieval)
+        dense_vectors = embedder.embed_dense(embed_inputs)
+        sparse_vectors = embedder.embed_sparse(embed_inputs)
 
         # Build payloads and ids
         ids = [str(uuid.uuid4()) for _ in chunks]
         payloads = [
             {
                 "text": chunk,
+                "title": title,
                 "source_file": fpath_str,
                 "chunk_index": i,
                 "total_chunks": len(chunks),
