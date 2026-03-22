@@ -32,6 +32,9 @@ def _collect_files(
     _extensions = {e.lower() for e in (ignore_extensions or [])}
     files: set[str] = set()
     for file_path in folder.rglob("*"):
+        if file_path.is_symlink():
+            logger.info("Ignoring symlink: %s", file_path)
+            continue
         if not file_path.is_file():
             continue
         rel_parts = file_path.relative_to(folder).parts
