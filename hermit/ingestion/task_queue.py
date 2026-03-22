@@ -6,6 +6,7 @@ from queue import Queue
 
 from hermit.config import INDEX_WORKERS
 from hermit.storage import qdrant
+from hermit.storage.qdrant import CollectionCorruptedError
 from hermit.storage.metadata import MetadataStore
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,16 @@ class _IndexTaskQueue:
         meta = MetadataStore(task.collection_name)
 
         if not file_path.exists() or not file_path.is_file():
-            qdrant.delete_by_source_file(task.collection_name, task.file_path)
+            try:
+                qdrant.delete_by_source_file(task.collection_name, task.file_path)
+            except CollectionCorruptedError:
+                logger.warning(
+                    "Collection '%s' was recreated due to data corruption; "
+                    "clearing metadata — re-scan to re-index all files",
+                    task.collection_name,
+                )
+                meta.destroy()
+                return
             meta.delete(task.file_path)
             logger.info("Skipped stale task and cleaned missing file: %s", task.file_path)
             return

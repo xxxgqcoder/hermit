@@ -1,9 +1,19 @@
 import logging
+import threading
 from qdrant_client import QdrantClient, models
 
 from hermit.config import DATA_ROOT
 
 logger = logging.getLogger(__name__)
+
+# Global lock protecting all local Qdrant client operations.
+# qdrant_client's local mode uses numpy arrays internally which are
+# NOT thread-safe; concurrent upsert/delete can corrupt the index.
+_lock = threading.Lock()
+
+
+class CollectionCorruptedError(Exception):
+    """Raised when local Qdrant data is corrupted and the collection was recreated."""
 
 
 def get_client() -> QdrantClient:
@@ -22,11 +32,8 @@ def client() -> QdrantClient:
     return _client
 
 
-def ensure_collection(name: str):
-    """Create collection with named dense + sparse vectors if it doesn't exist."""
-    c = client()
-    if c.collection_exists(name):
-        return
+def _create_collection_unlocked(c: QdrantClient, name: str):
+    """Internal helper to create a collection. Caller must already hold _lock."""
     from hermit.config import DENSE_DIM
     c.create_collection(
         collection_name=name,
@@ -37,36 +44,60 @@ def ensure_collection(name: str):
             "sparse": models.SparseVectorParams(),
         },
     )
-    # Payload index on source_file for efficient filtering/deletion
     c.create_payload_index(
         collection_name=name,
         field_name="source_file",
         field_schema=models.PayloadSchemaType.KEYWORD,
     )
-    logger.info("Created collection '%s'", name)
+
+
+def ensure_collection(name: str):
+    """Create collection with named dense + sparse vectors if it doesn't exist."""
+    with _lock:
+        c = client()
+        if c.collection_exists(name):
+            return
+        _create_collection_unlocked(c, name)
+        logger.info("Created collection '%s'", name)
 
 
 def delete_collection(name: str):
-    c = client()
-    if c.collection_exists(name):
-        c.delete_collection(name)
-        logger.info("Deleted collection '%s'", name)
+    with _lock:
+        c = client()
+        if c.collection_exists(name):
+            c.delete_collection(name)
+            logger.info("Deleted collection '%s'", name)
 
 
 def delete_by_source_file(collection_name: str, source_file: str):
-    """Delete all points whose source_file matches."""
-    c = client()
-    c.delete(
-        collection_name=collection_name,
-        points_selector=models.FilterSelector(
-            filter=models.Filter(
-                must=[models.FieldCondition(
-                    key="source_file",
-                    match=models.MatchValue(value=source_file),
-                )]
+    """Delete all points whose source_file matches.
+
+    Raises CollectionCorruptedError if the local Qdrant data is corrupted;
+    the collection is automatically recreated in that case.
+    """
+    with _lock:
+        c = client()
+        try:
+            c.delete(
+                collection_name=collection_name,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[models.FieldCondition(
+                            key="source_file",
+                            match=models.MatchValue(value=source_file),
+                        )]
+                    )
+                ),
             )
-        ),
-    )
+        except IndexError:
+            logger.warning(
+                "Local Qdrant data corrupted for collection '%s', recreating",
+                collection_name,
+            )
+            c.delete_collection(collection_name)
+            _create_collection_unlocked(c, collection_name)
+            logger.info("Recreated collection '%s'", collection_name)
+            raise CollectionCorruptedError(collection_name)
 
 
 def upsert_chunks(
@@ -77,7 +108,6 @@ def upsert_chunks(
     payloads: list[dict],
 ):
     """Upsert chunk points with named dense + sparse vectors."""
-    c = client()
     points = []
     for i, point_id in enumerate(ids):
         sv = sparse_vectors[i]
@@ -92,4 +122,11 @@ def upsert_chunks(
             },
             payload=payloads[i],
         ))
-    c.upsert(collection_name=collection_name, points=points)
+    with _lock:
+        client().upsert(collection_name=collection_name, points=points)
+
+
+def query_points(collection_name: str, **kwargs):
+    """Thread-safe wrapper around client().query_points()."""
+    with _lock:
+        return client().query_points(collection_name=collection_name, **kwargs)

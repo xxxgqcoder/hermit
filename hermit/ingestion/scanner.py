@@ -9,6 +9,7 @@ from hermit.ingestion.task_queue import enqueue_index_task
 from hermit.retrieval import embedder
 from hermit.storage.metadata import MetadataStore
 from hermit.storage import qdrant
+from hermit.storage.qdrant import CollectionCorruptedError
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,16 @@ def _index_file(
         return False
 
     # Delete old entries (safe even if none exist)
-    qdrant.delete_by_source_file(collection_name, fpath_str)
+    try:
+        qdrant.delete_by_source_file(collection_name, fpath_str)
+    except CollectionCorruptedError:
+        logger.warning(
+            "Collection '%s' was recreated due to data corruption; "
+            "clearing metadata so all files are re-indexed on next scan",
+            collection_name,
+        )
+        meta.destroy()
+        return False
 
     # Prepend document title to each chunk for embedding
     title = file_path.stem
@@ -129,7 +139,16 @@ def scan_folder(
 
     # --- Handle deletions: indexed but file gone ---
     for fpath_str in to_delete:
-        qdrant.delete_by_source_file(collection_name, fpath_str)
+        try:
+            qdrant.delete_by_source_file(collection_name, fpath_str)
+        except CollectionCorruptedError:
+            logger.warning(
+                "Collection '%s' was recreated due to data corruption; "
+                "clearing metadata and aborting scan — re-scan to re-index all files",
+                collection_name,
+            )
+            meta.destroy()
+            return {"added": 0, "updated": 0, "deleted": 0, "corrupted": True}
         meta.delete(fpath_str)
         deleted += 1
         logger.info("Removed deleted file from index: %s", fpath_str)
