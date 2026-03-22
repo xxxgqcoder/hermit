@@ -141,5 +141,7 @@ class TestRebuildCollection:
         mock_scan.assert_called_once_with(
             "test_col", "/tmp/docs",
             defer_indexing=True,
+            ignore_patterns=None,
+            ignore_extensions=None,
         )
         assert result == {"added": 3, "updated": 0, "deleted": 0}

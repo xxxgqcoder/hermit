@@ -20,7 +20,12 @@ def _save(data: dict[str, dict]):
     _REGISTRY_PATH.write_text(json.dumps(data, indent=2))
 
 
-def register(name: str, folder_path: str):
+def register(
+    name: str,
+    folder_path: str,
+    ignore_patterns: list[str] | None = None,
+    ignore_extensions: list[str] | None = None,
+):
     if not name:
         raise ValueError("Collection name must not be empty")
     if len(name) > MAX_COLLECTION_NAME_LENGTH:
@@ -44,7 +49,30 @@ def register(name: str, folder_path: str):
             )
     data[name] = {
         "folder_path": folder_path,
+        "ignore_patterns": ignore_patterns or [],
+        "ignore_extensions": [e.lower() for e in (ignore_extensions or [])],
     }
+    _save(data)
+
+
+def update(
+    name: str,
+    ignore_patterns: list[str] | None = None,
+    ignore_extensions: list[str] | None = None,
+    clear_ignore: bool = False,
+    clear_ignore_ext: bool = False,
+):
+    data = _load()
+    if name not in data:
+        raise ValueError(f"Collection '{name}' not found")
+    if clear_ignore:
+        data[name]["ignore_patterns"] = []
+    elif ignore_patterns is not None:
+        data[name]["ignore_patterns"] = ignore_patterns
+    if clear_ignore_ext:
+        data[name]["ignore_extensions"] = []
+    elif ignore_extensions is not None:
+        data[name]["ignore_extensions"] = [e.lower() for e in ignore_extensions]
     _save(data)
 
 

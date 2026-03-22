@@ -1,3 +1,4 @@
+import fnmatch
 import hashlib
 import logging
 import uuid
@@ -20,14 +21,26 @@ def _file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def _collect_files(folder: Path) -> set[str]:
-    """Collect all non-hidden files under folder."""
+def _collect_files(
+    folder: Path,
+    ignore_patterns: list[str] | None = None,
+    ignore_extensions: list[str] | None = None,
+) -> set[str]:
+    """Collect all non-hidden files under folder, applying ignore rules."""
+    _patterns = ignore_patterns or []
+    _extensions = {e.lower() for e in (ignore_extensions or [])}
     files: set[str] = set()
     for file_path in folder.rglob("*"):
         if not file_path.is_file():
             continue
         if any(part.startswith(".") for part in file_path.parts):
             continue
+        if _extensions and file_path.suffix.lower() in _extensions:
+            continue
+        if _patterns:
+            rel = str(file_path.relative_to(folder))
+            if any(fnmatch.fnmatch(rel, pat) for pat in _patterns):
+                continue
         files.add(str(file_path))
     return files
 
@@ -86,6 +99,8 @@ def scan_folder(
     collection_name: str,
     folder_path: str,
     defer_indexing: bool = True,
+    ignore_patterns: list[str] | None = None,
+    ignore_extensions: list[str] | None = None,
 ) -> dict:
     """Scan folder and sync index with three-way diff. Returns stats.
 
@@ -99,7 +114,7 @@ def scan_folder(
     meta = MetadataStore(collection_name)
 
     # Step 1: Collect current disk files and indexed records
-    disk_files = _collect_files(folder)
+    disk_files = _collect_files(folder, ignore_patterns, ignore_extensions)
     indexed = meta.get_all_records()  # {path: (hash, mtime)}
     indexed_set = set(indexed.keys())
 
@@ -147,6 +162,8 @@ def scan_folder(
 def rebuild_collection(
     collection_name: str,
     folder_path: str,
+    ignore_patterns: list[str] | None = None,
+    ignore_extensions: list[str] | None = None,
 ):
     """Drop and recreate a collection, then re-index all files via task queue."""
     logger.info("Rebuilding index for collection '%s'...", collection_name)
@@ -156,4 +173,6 @@ def rebuild_collection(
         collection_name,
         folder_path,
         defer_indexing=True,
+        ignore_patterns=ignore_patterns,
+        ignore_extensions=ignore_extensions,
     )

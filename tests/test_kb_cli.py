@@ -118,6 +118,77 @@ def test_register_reuse_folder_after_unregister(tmp_registry):
     register("col2", "/tmp/docs")  # should succeed
 
 
+# ── Ignore patterns in registry ─────────────────────────────────
+
+
+def test_register_with_ignore_patterns(tmp_registry):
+    """register() should persist ignore_patterns and ignore_extensions."""
+    from hermit.storage.registry import register, get_all
+
+    register("col1", "/tmp/docs", ignore_patterns=["build/**", "*.log"],
+             ignore_extensions=[".pdf", ".BIN"])
+    cfg = get_all()["col1"]
+    assert cfg["ignore_patterns"] == ["build/**", "*.log"]
+    assert cfg["ignore_extensions"] == [".pdf", ".bin"]  # lowercased
+
+
+def test_register_without_ignore_defaults_empty(tmp_registry):
+    """register() without ignore args should store empty lists."""
+    from hermit.storage.registry import register, get_all
+
+    register("col1", "/tmp/docs")
+    cfg = get_all()["col1"]
+    assert cfg["ignore_patterns"] == []
+    assert cfg["ignore_extensions"] == []
+
+
+def test_update_ignore_patterns(tmp_registry):
+    """update() should replace ignore_patterns for an existing collection."""
+    from hermit.storage.registry import register, update, get_all
+
+    register("col1", "/tmp/docs")
+    update("col1", ignore_patterns=["*.tmp", "cache/**"])
+    cfg = get_all()["col1"]
+    assert cfg["ignore_patterns"] == ["*.tmp", "cache/**"]
+    assert cfg["ignore_extensions"] == []  # unchanged
+
+
+def test_update_ignore_extensions(tmp_registry):
+    """update() should replace ignore_extensions for an existing collection."""
+    from hermit.storage.registry import register, update, get_all
+
+    register("col1", "/tmp/docs", ignore_extensions=[".pdf"])
+    update("col1", ignore_extensions=[".bin", ".EXE"])
+    cfg = get_all()["col1"]
+    assert cfg["ignore_extensions"] == [".bin", ".exe"]  # lowercased
+
+
+def test_update_clear_ignore(tmp_registry):
+    """update() with clear_ignore should empty ignore_patterns."""
+    from hermit.storage.registry import register, update, get_all
+
+    register("col1", "/tmp/docs", ignore_patterns=["*.log"])
+    update("col1", clear_ignore=True)
+    assert get_all()["col1"]["ignore_patterns"] == []
+
+
+def test_update_clear_ignore_ext(tmp_registry):
+    """update() with clear_ignore_ext should empty ignore_extensions."""
+    from hermit.storage.registry import register, update, get_all
+
+    register("col1", "/tmp/docs", ignore_extensions=[".pdf"])
+    update("col1", clear_ignore_ext=True)
+    assert get_all()["col1"]["ignore_extensions"] == []
+
+
+def test_update_nonexistent_collection(tmp_registry):
+    """update() for a missing collection should raise ValueError."""
+    from hermit.storage.registry import update
+
+    with pytest.raises(ValueError, match="not found"):
+        update("ghost", ignore_patterns=["*.log"])
+
+
 # ── CLI integration tests (subprocess) ──────────────────────────
 
 

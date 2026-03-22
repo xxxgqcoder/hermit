@@ -261,11 +261,21 @@ def cmd_kb_add(args):
         _error(f"'{folder}' is not a directory")
 
     try:
-        register(args.name, str(folder))
+        register(
+            args.name,
+            str(folder),
+            ignore_patterns=args.ignore or None,
+            ignore_extensions=args.ignore_ext or None,
+        )
     except ValueError as e:
         _error(str(e))
 
-    _output({"status": "added", "name": args.name, "folder_path": str(folder)})
+    result = {"status": "added", "name": args.name, "folder_path": str(folder)}
+    if args.ignore:
+        result["ignore_patterns"] = args.ignore
+    if args.ignore_ext:
+        result["ignore_extensions"] = args.ignore_ext
+    _output(result)
 
 
 def cmd_kb_remove(args):
@@ -279,6 +289,28 @@ def cmd_kb_remove(args):
     unregister(args.name)
     MetadataStore(args.name).destroy()
     _output({"status": "removed", "name": args.name})
+
+
+def cmd_kb_update(args):
+    from hermit.storage.registry import get_all, update
+
+    existing = get_all()
+    if args.name not in existing:
+        _error(f"collection '{args.name}' not found")
+
+    try:
+        update(
+            args.name,
+            ignore_patterns=args.ignore or None,
+            ignore_extensions=args.ignore_ext or None,
+            clear_ignore=args.clear_ignore,
+            clear_ignore_ext=args.clear_ignore_ext,
+        )
+    except ValueError as e:
+        _error(str(e))
+
+    updated = get_all()[args.name]
+    _output({"status": "updated", "name": args.name, **updated})
 
 
 def cmd_kb_list(_args):
@@ -412,9 +444,24 @@ def main():
     kb_add = kb_sub.add_parser("add", help="Add a knowledge base directory")
     kb_add.add_argument("name", help="Collection alias")
     kb_add.add_argument("dir", help="Path to the directory")
+    kb_add.add_argument("--ignore", action="append", default=[],
+                        help="Glob pattern for paths to ignore (repeatable)")
+    kb_add.add_argument("--ignore-ext", action="append", default=[],
+                        help="File extension to ignore, e.g. .pdf (repeatable)")
 
     kb_rm = kb_sub.add_parser("remove", help="Remove a knowledge base")
     kb_rm.add_argument("name", help="Collection name")
+
+    kb_update = kb_sub.add_parser("update", help="Update ignore rules for a knowledge base")
+    kb_update.add_argument("name", help="Collection name")
+    kb_update.add_argument("--ignore", action="append", default=[],
+                           help="Glob pattern for paths to ignore (replaces existing, repeatable)")
+    kb_update.add_argument("--ignore-ext", action="append", default=[],
+                           help="File extension to ignore, e.g. .pdf (replaces existing, repeatable)")
+    kb_update.add_argument("--clear-ignore", action="store_true",
+                           help="Clear all path ignore patterns")
+    kb_update.add_argument("--clear-ignore-ext", action="store_true",
+                           help="Clear all extension ignore patterns")
 
     kb_sub.add_parser("list", help="List all knowledge bases")
 
@@ -457,6 +504,8 @@ def main():
             cmd_kb_add(args)
         elif args.kb_command == "remove":
             cmd_kb_remove(args)
+        elif args.kb_command == "update":
+            cmd_kb_update(args)
         elif args.kb_command == "list":
             cmd_kb_list(args)
         else:

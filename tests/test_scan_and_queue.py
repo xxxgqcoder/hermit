@@ -189,6 +189,86 @@ def test_scan_folder_sync_mode(mock_index, mock_qdrant, scan_env, tmp_path, monk
     assert mock_index.call_count == 2
 
 
+# ── Ignore pattern tests ────────────────────────────────────────
+
+
+def test_collect_files_ignore_extensions(tmp_path):
+    """_collect_files should exclude files matching ignore_extensions."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "readme.md").write_text("hello")
+    (folder / "image.png").write_text("img")
+    (folder / "data.PDF").write_text("pdf")  # uppercase
+
+    from hermit.ingestion.scanner import _collect_files
+
+    files = _collect_files(folder, ignore_extensions=[".png", ".pdf"])
+    names = {Path(f).name for f in files}
+    assert names == {"readme.md"}
+
+
+def test_collect_files_ignore_patterns(tmp_path):
+    """_collect_files should exclude files matching glob ignore_patterns."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "readme.md").write_text("hello")
+    (folder / "notes.log").write_text("log")
+    sub = folder / "build"
+    sub.mkdir()
+    (sub / "output.md").write_text("built")
+
+    from hermit.ingestion.scanner import _collect_files
+
+    files = _collect_files(folder, ignore_patterns=["*.log", "build/*"])
+    names = {Path(f).name for f in files}
+    assert names == {"readme.md"}
+
+
+def test_collect_files_ignore_both(tmp_path):
+    """_collect_files should apply both ignore_patterns and ignore_extensions."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "a.md").write_text("a")
+    (folder / "b.txt").write_text("b")
+    (folder / "c.log").write_text("c")
+    (folder / "d.pdf").write_text("d")
+
+    from hermit.ingestion.scanner import _collect_files
+
+    files = _collect_files(folder, ignore_patterns=["*.log"], ignore_extensions=[".pdf"])
+    names = {Path(f).name for f in files}
+    assert names == {"a.md", "b.txt"}
+
+
+@patch("hermit.ingestion.scanner.qdrant")
+@patch("hermit.ingestion.scanner.enqueue_index_task")
+def test_scan_folder_with_ignore(mock_enqueue, mock_qdrant, tmp_path, monkeypatch):
+    """scan_folder should skip files matching ignore rules."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "a.md").write_text("keep")
+    (folder / "b.log").write_text("skip")
+    (folder / "c.pdf").write_text("skip")
+
+    mock_enqueue.return_value = True
+    mock_meta = MagicMock()
+    mock_meta.get_all_records.return_value = {}
+    monkeypatch.setattr(
+        "hermit.ingestion.scanner.MetadataStore",
+        lambda name: mock_meta,
+    )
+
+    from hermit.ingestion.scanner import scan_folder
+
+    stats = scan_folder(
+        "test", str(folder), defer_indexing=True,
+        ignore_patterns=["*.log"], ignore_extensions=[".pdf"],
+    )
+
+    assert stats["added"] == 1
+    assert mock_enqueue.call_count == 1
+
+
 # ── Task queue tests ────────────────────────────────────────────
 
 

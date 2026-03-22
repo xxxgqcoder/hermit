@@ -48,6 +48,8 @@ def sync_collection(name: str):
         name,
         cfg["folder_path"],
         defer_indexing=True,
+        ignore_patterns=cfg.get("ignore_patterns", []),
+        ignore_extensions=cfg.get("ignore_extensions", []),
     )
     return SyncResponse(**stats)
 

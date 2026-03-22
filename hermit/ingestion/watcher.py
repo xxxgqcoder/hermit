@@ -17,9 +17,13 @@ class _Handler(FileSystemEventHandler):
     the scan after 2 seconds of quiet.
     """
 
-    def __init__(self, collection_name: str, folder_path: str):
+    def __init__(self, collection_name: str, folder_path: str,
+                 ignore_patterns: list[str] | None = None,
+                 ignore_extensions: list[str] | None = None):
         self.collection_name = collection_name
         self.folder_path = folder_path
+        self.ignore_patterns = ignore_patterns
+        self.ignore_extensions = ignore_extensions
         self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
 
@@ -38,6 +42,8 @@ class _Handler(FileSystemEventHandler):
                 self.collection_name,
                 self.folder_path,
                 defer_indexing=True,
+                ignore_patterns=self.ignore_patterns,
+                ignore_extensions=self.ignore_extensions,
             )
             logger.info("Watcher rescan done: %s", stats)
         except Exception:
@@ -52,12 +58,14 @@ class _Handler(FileSystemEventHandler):
 _observers: dict[str, Observer] = {}
 
 
-def start_watching(collection_name: str, folder_path: str):
+def start_watching(collection_name: str, folder_path: str,
+                   ignore_patterns: list[str] | None = None,
+                   ignore_extensions: list[str] | None = None):
     """Start watching a folder for changes."""
     if collection_name in _observers:
         return  # Already watching
 
-    handler = _Handler(collection_name, folder_path)
+    handler = _Handler(collection_name, folder_path, ignore_patterns, ignore_extensions)
     observer = Observer()
     observer.schedule(handler, folder_path, recursive=True)
     observer.daemon = True
