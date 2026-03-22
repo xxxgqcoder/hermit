@@ -13,7 +13,7 @@ Hermit 本地语义搜索服务的使用指南。Hermit 提供基于向量的混
 
 ```sh
 uv tool install hermit
-# 部署 Skill 到 ~/.agents/skills/hermit/（可选，使 Agent 自动发现）
+# 部署 Skill 到 ~/.agents/skills/hermit-search/（可选，使 Agent 自动发现）
 hermit install-skills
 ```
 

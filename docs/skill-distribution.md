@@ -7,7 +7,7 @@
 本仓库采用“**仓库内可直接用 + 全局可发现复用**”的双轨分发策略：
 
 1. **项目级分发**：Skill 文件保存在仓库 `.agents/skills/`，在当前仓库上下文中可直接被 Agent 发现。
-2. **全局分发**：通过 CLI 子命令 `hermit install-skills` 将 Skill 安装到 `~/.agents/skills/hermit/`，供其他工作区复用（按项目命名空间隔离）。
+2. **全局分发**：通过 CLI 子命令 `hermit install-skills` 将 Skill 安装到 `~/.agents/skills/{skill_name}/`，供其他工作区复用。
 
 ## 2. 目录与角色划分
 
@@ -30,10 +30,9 @@
 
 ### 2.3 全局安装目录（运行态）
 
-- 路径：`~/.agents/skills/{project}/`（如 `~/.agents/skills/hermit/`）
-- 作用：跨仓库共享 Skill，按项目命名空间隔离，避免不同项目的同名 Skill 冲突
+- 路径：`~/.agents/skills/{skill_name}/`（如 `~/.agents/skills/hermit-search/`）
+- 作用：跨仓库共享 Skill，扁平一层目录结构
 - 安装时会写入 `.origin` 文件（含包名 + 版本），用于来源追踪
-- 卸载时若项目目录为空，自动清理
 
 ## 3. 分发链路（端到端）
 
@@ -73,7 +72,7 @@ CLI 逻辑（`hermit/cli.py` 中的 `_find_skills_dir` + `cmd_install_skills`）
 
 1. 优先读取包内目录 `hermit/_skills/`（通过 `__file__` 相对路径定位）。
 2. 若不存在（开发模式），回退读取仓库 `.agents/skills/`（从 `hermit/` 向上一级定位项目根）。
-3. 将每个含 `SKILL.md` 的 Skill 目录拷贝到 `~/.agents/skills/{project}/<skill-name>/`（如 `~/.agents/skills/hermit/hermit-search/`）。
+3. 将每个含 `SKILL.md` 的 Skill 目录拷贝到 `~/.agents/skills/<skill-name>/`（如 `~/.agents/skills/hermit-search/`）。
 4. 在目标目录写入 `.origin` 文件：`{"package": "hermit", "version": "0.1.0"}`。
 5. 若传入 `--uninstall`，仅删除本包定义的 Skill 对应的全局目录。
 
@@ -85,7 +84,7 @@ CLI 逻辑（`hermit/cli.py` 中的 `_find_skills_dir` + `cmd_install_skills`）
 
 ### 4.2 全局复用
 
-安装到 `~/.agents/skills/hermit/` 后，其他工作区中的 Agent 也可复用这些 Skill。
+安装到 `~/.agents/skills/{skill_name}/` 后，其他工作区中的 Agent 也可复用这些 Skill。
 
 ## 5. 维护建议（发布检查清单）
 
@@ -94,7 +93,7 @@ CLI 逻辑（`hermit/cli.py` 中的 `_find_skills_dir` + `cmd_install_skills`）
 1. `.agents/skills/` 下每个 Skill 均含 `SKILL.md`。
 2. `SKILL.md` frontmatter 的 `name` 与目录名一致。
 3. `pyproject.toml` 的 `force-include` 路径与真实目录一致。
-4. `hermit install-skills` 可返回成功 JSON，并正确复制到 `~/.agents/skills/hermit/`。
+4. `hermit install-skills` 可返回成功 JSON，并正确复制到 `~/.agents/skills/{skill_name}/`。
 5. `hermit install-skills --uninstall` 可正确清理安装内容。
 6. `uv build` 后检查 wheel 内含 `hermit/_skills/<skill-name>/SKILL.md`。
 
@@ -102,7 +101,7 @@ CLI 逻辑（`hermit/cli.py` 中的 `_find_skills_dir` + `cmd_install_skills`）
 
 当前分发配置与仓库目录已对齐：
 
-- `.agents/skills/hermit-search/SKILL.md` → `hermit/_skills/hermit-search/SKILL.md`（wheel 内）→ `~/.agents/skills/hermit/hermit-search/SKILL.md`（全局安装）
+- `.agents/skills/hermit-search/SKILL.md` → `hermit/_skills/hermit-search/SKILL.md`（wheel 内）→ `~/.agents/skills/hermit-search/SKILL.md`（全局安装）
 
 ---
 
