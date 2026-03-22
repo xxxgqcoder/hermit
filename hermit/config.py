@@ -43,7 +43,11 @@ MAX_COLLECTION_NAME_LENGTH = 64
 COLLECTION_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 
 # Indexing concurrency
-INDEX_WORKERS = int(os.environ.get("HERMIT_INDEX_WORKERS", 4))
+INDEX_WORKERS = int(os.environ.get("HERMIT_INDEX_WORKERS", 2))
+
+# ONNX Runtime thread control — prevents oversubscription on Linux.
+# Default: half of available CPU cores (min 2).
+ONNX_THREADS = int(os.environ.get("HERMIT_ONNX_THREADS", max(2, os.cpu_count() // 2)))
 
 # Polling interval for knowledge base file change detection (seconds)
 # Default: 900s (15 minutes). Override with HERMIT_POLL_INTERVAL env var.

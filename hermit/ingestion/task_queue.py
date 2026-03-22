@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 class IndexTask:
     collection_name: str
     file_path: str
+    file_hash: str | None = None
 
 
 class _IndexTaskQueue:
@@ -114,6 +115,7 @@ class _IndexTaskQueue:
             task.collection_name,
             file_path,
             meta,
+            file_hash=task.file_hash,
         )
         if ok:
             logger.info("Indexed by background task: %s", task.file_path)
@@ -129,11 +131,13 @@ def start_task_worker():
 def enqueue_index_task(
     collection_name: str,
     file_path: str,
+    file_hash: str | None = None,
 ) -> bool:
     return _QUEUE.enqueue(
         IndexTask(
             collection_name=collection_name,
             file_path=file_path,
+            file_hash=file_hash,
         )
     )
 

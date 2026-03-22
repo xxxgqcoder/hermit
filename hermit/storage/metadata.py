@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -8,10 +9,26 @@ from hermit.config import DATA_ROOT
 class MetadataStore:
     """SQLite-based metadata store for tracking indexed files."""
 
+    _instances: dict[str, "MetadataStore"] = {}
+    _cls_lock = threading.Lock()
+
+    def __new__(cls, collection_name: str):
+        with cls._cls_lock:
+            if collection_name in cls._instances:
+                return cls._instances[collection_name]
+            instance = super().__new__(cls)
+            cls._instances[collection_name] = instance
+            return instance
+
     def __init__(self, collection_name: str):
+        if hasattr(self, "_initialized"):
+            return
         db_dir = DATA_ROOT / "metadata"
         db_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = db_dir / f"{collection_name}.db"
+        self._collection_name = collection_name
+        self._local = threading.local()
+        self._initialized = True
         self._init_db()
 
     def _init_db(self):
@@ -27,7 +44,11 @@ class MetadataStore:
             """)
 
     def _conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.db_path))
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(str(self.db_path))
+            self._local.conn = conn
+        return conn
 
     def get_all_records(self) -> dict[str, tuple[str, float]]:
         """Return {file_path: (file_hash, file_mtime)} for all indexed files."""
@@ -62,6 +83,24 @@ class MetadataStore:
             "total_chunks": row[1] or 0,
         }
 
+    def get_chunk_count(self, file_path: str) -> int:
+        """Return chunk_count for a file, or 0 if not found."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT chunk_count FROM files WHERE file_path = ?", (file_path,)
+            ).fetchone()
+        return row[0] if row else 0
+
     def destroy(self):
+        # Close thread-local connections
+        conn = getattr(self._local, "conn", None)
+        if conn:
+            conn.close()
+            self._local.conn = None
         if self.db_path.exists():
             self.db_path.unlink()
+        with self._cls_lock:
+            self._instances.pop(self._collection_name, None)
+            # Allow re-initialization
+        if hasattr(self, "_initialized"):
+            del self._initialized

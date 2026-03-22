@@ -108,6 +108,51 @@ def upsert_chunks(
     payloads: list[dict],
 ):
     """Upsert chunk points with named dense + sparse vectors."""
+    points = _build_points(ids, dense_vectors, sparse_vectors, payloads)
+    with _lock:
+        client().upsert(collection_name=collection_name, points=points)
+
+
+def replace_file_chunks(
+    collection_name: str,
+    source_file: str,
+    ids: list[str],
+    dense_vectors: list[list[float]],
+    sparse_vectors: list,
+    payloads: list[dict],
+):
+    """Delete old points for source_file and upsert new ones in a single lock.
+
+    Raises CollectionCorruptedError if the local Qdrant data is corrupted.
+    """
+    points = _build_points(ids, dense_vectors, sparse_vectors, payloads)
+    with _lock:
+        c = client()
+        try:
+            c.delete(
+                collection_name=collection_name,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[models.FieldCondition(
+                            key="source_file",
+                            match=models.MatchValue(value=source_file),
+                        )]
+                    )
+                ),
+            )
+        except IndexError:
+            logger.warning(
+                "Local Qdrant data corrupted for collection '%s', recreating",
+                collection_name,
+            )
+            c.delete_collection(collection_name)
+            _create_collection_unlocked(c, collection_name)
+            logger.info("Recreated collection '%s'", collection_name)
+            raise CollectionCorruptedError(collection_name)
+        c.upsert(collection_name=collection_name, points=points)
+
+
+def _build_points(ids, dense_vectors, sparse_vectors, payloads):
     points = []
     for i, point_id in enumerate(ids):
         sv = sparse_vectors[i]
@@ -122,8 +167,7 @@ def upsert_chunks(
             },
             payload=payloads[i],
         ))
-    with _lock:
-        client().upsert(collection_name=collection_name, points=points)
+    return points
 
 
 def query_points(collection_name: str, **kwargs):
