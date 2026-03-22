@@ -34,7 +34,8 @@ def _collect_files(
     for file_path in folder.rglob("*"):
         if not file_path.is_file():
             continue
-        if any(part.startswith(".") for part in file_path.parts):
+        rel_parts = file_path.relative_to(folder).parts
+        if any(part.startswith(".") for part in rel_parts):
             continue
         if _extensions and file_path.suffix.lower() in _extensions:
             continue
