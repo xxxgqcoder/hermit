@@ -115,7 +115,7 @@ Current models:
 
 ### Requirements
 
-- Python `3.12+`
+- Python `3.12 ~ 3.13`
 - macOS or Linux
 
 Using a virtual environment is recommended.
