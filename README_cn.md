@@ -115,7 +115,7 @@ Hermit 的搜索流程如下：
 
 ### 环境要求
 
-- Python `3.12+`
+- Python `3.12 ~ 3.13`
 - macOS 或 Linux
 
 建议使用虚拟环境。
