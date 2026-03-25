@@ -1,5 +1,5 @@
 
-分层结构：
+## 分层结构：
 
 1. **Ingestion 层**：文件夹扫描 + 定期轮询 → 变更检测（SQLite）→ 文本切片 → 向量化 → 入库
 2. **检索层 (Recall)**：Dense + Sparse 双路召回，Qdrant RRF 融合
@@ -18,7 +18,7 @@
 - 与 Qdrant 同生态，API 设计简洁
 - 自动管理模型下载和缓存
 
-**约束**：模型选择受限于 fastembed 支持的 ONNX 预转换模型列表。原设计中 BGE-M3 和 bge-reranker-v2-m3 均不在 fastembed 0.7.x 支持范围内，因此需要替换。
+**约束**：模型选择受限于 fastembed 支持的 ONNX 预转换模型列表。
 
 ---
 
@@ -38,7 +38,7 @@
 
 ### 变更检测（SQLite 元数据库）
 
-每个知识库维护一个 SQLite 元数据库（存储在 `data/metadata/{collection}.db`），记录已索引文件状态：
+每个知识库维护一个 SQLite 元数据库（存储在 `~/.hermit/data/metadata/{collection}.db`），记录已索引文件状态：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -73,13 +73,13 @@
 
 ## 存储 Schema（Qdrant）
 
-每个知识库 = 1 个 collection，使用 **named vectors**。Qdrant 运行在嵌入式模式（embedded），数据存储在 `data/qdrant/`。
+每个知识库 = 1 个 collection，使用 **named vectors**。Qdrant 运行在嵌入式模式（embedded），数据存储在 `~/.hermit/data/qdrant/`。
 
 ### 向量配置
 
 | 向量名 | 维度 | 距离 | 说明 |
-|---|---|---768 | Cosine | jina-embeddings-v2-base-zh
-| `dense` | 512 | Cosine | bge-small-zh-v1.5 语义向量 |
+|---|---|---|---|
+| `dense` | 768 | Cosine | jina-embeddings-v2-base-zh 语义向量 |
 | `sparse` | 可变 | Dot | BM25 稀疏词权重向量 |
 
 ### Payload 结构
@@ -105,63 +105,34 @@
 使用 Qdrant 原生的 **Reciprocal Rank Fusion (RRF)**：
 
 1. 使用 Qdrant `prefetch` + `query` API 进行双路召回
-2. Dense prefetch 和 Sparse prefetch 各取 Top-N 候选（N = rerank_candidates，默认 30）
+2. Dense prefetch 和 Sparse prefetch 各取 Top-N 候选（N = rerank_candidates，默认 50）
 3. Qdrant 服务端执行 RRF 融合，合并去重
 4. 融合后取 Top-N 候选送入 Reranker
 
-> **与原设计的差异**：原设计使用加权分数融合（Weighted Score Fusion, `w_dense * dense_score + w_sparse * sparse_score`）。实现中改用 Qdrant 内置 RRF，因为 RRF 是 rank-based 融合，不依赖异构分数的归一化，实现更简洁且鲁棒。API 中 `w_dense`/`w_sparse` 参数保留但当前未使用，待后续按需接入。
+API 中 `w_dense`/`w_sparse` 参数保留，当前未使用。
 
 ---
 
 ## 模型选型
 
-### 推理后端约束
-
-所有模型必须在 **fastembed 0.7.x** 的支持列表内（需预转换为 ONNX 格式）。这排除了原设计中的 BGE-M3 和 bge-reranker-v2-m3。
-
-### 当前模型清单
+### 模型清单
 
 | 模型 | 用途 | 大小 | 说明 |
 |---|---|---|---|
-| `BAAI/bge-small-zh-v1.5` | Dense Embedding (512 维) | ~90MB | 中文语义向量 |
-| `Qdrant/bm25` | Sparse Embedding | ~小 | BM25 稀疏词权重 |
-| `Xenova/ms-marco-MiniLM-L-12-v2` | Reranker (Cross-Encoder) | ~120MB | 英文 reranker |
-
-### 与原设计的差异
-
-| 原设计 | 实际选型 | 原因 |
-|---|---|---|
-| `BAAI/bge-m3` (Dense+Sparse 统一模型, 1024 维, ~2GB) | `bge-small-zh-v1.5` (Dense) + `Qdrant/bm25` (Sparse) | fastembed 不支持 BGE-M3 |
-| `BAAI/bge-reranker-v2-m3` (~1.2GB, 多语言) | `Xenova/ms-marco-MiniLM-L-12-v2` (~120MB, 英文) | fastembed 不支持 bge-reranker-v2-m3；较大替代模型下载失败 |
-
-### 已验证可用的 fastembed 多语言 Dense 模型
-
-| 模型 | 维度 | 大小 | 语言 |
-|---|---|---|---|
-| `jinaai/jina-embeddings-v2-base-zh` | 768 | 0.64GB | 中英 |
-| `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | 384 | 0.22GB | 50+ 语言 |
-| `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` | 768 | 1.0GB | 50+ 语言 |
-| `intfloat/multilingual-e5-large` | 1024 | 2.24GB | 100+ 语言 |
-| `jinaai/jina-embeddings-v3` | 1024 | 2.29GB | ~100 语言 |
-
-### 升级路径
-
-- **Dense Embedding**：推荐升级到 `jinaai/jina-embeddings-v2-base-zh`（768 维，中英双语，0.64GB）
-- **Reranker**：推荐升级到 `jinaai/jina-reranker-v2-base-multilingual`（多语言，fastembed 支持）
-- 如 fastembed 后续版本支持 BGE-M3，可回到原设计方案
+| `jinaai/jina-embeddings-v2-base-zh` | Dense Embedding (768 维) | ~0.64GB | 中英双语语义向量 |
+| `Qdrant/bm25` | Sparse Embedding | <50MB | BM25 稀疏词权重 |
+| `jinaai/jina-reranker-v2-base-multilingual` | Reranker (Cross-Encoder) | ~0.7GB | 多语言 reranker |
 
 ---
 
 ## 精排（Reranker）
 
-### 当前选型：Xenova/ms-marco-MiniLM-L-12-v2
-
 | 维度 | 说明 |
 |---|---|
-| 模型 | `Xenova/ms-marco-MiniLM-L-12-v2` (~120MB) |
+| 模型 | `jinaai/jina-reranker-v2-base-multilingual` (~0.7GB) |
 | 架构 | Cross-Encoder |
 | 接口 | fastembed `TextCrossEncoder` |
-| 语言 | 英文（对中文效果有限） |
+| 语言 | 多语言（中英均适用） |
 
 ### 实现细节
 
@@ -174,7 +145,7 @@
 
 ### 设计原则
 
-模型文件存放在项目目录内（`./models/`），通过 `.gitignore` 排除，不作为 git 项目的一部分。
+模型文件存放在 `~/.hermit/models/`，不随项目代码分发，通过 `.gitignore` 排除。
 
 优势：
 - 不污染用户全局环境（如 `~/.cache/huggingface`）
@@ -183,44 +154,36 @@
 
 ### 路径管理
 
-- 由 `config.py` 统一定义 `MODEL_ROOT`（默认 `./models`）
+- 由 `config.py` 统一定义 `HERMIT_HOME`（默认 `~/.hermit/`，可通过 `HERMIT_HOME` 环境变量覆盖）
+- `MODEL_ROOT = HERMIT_HOME / "models"`
+- `DATA_ROOT = HERMIT_HOME / "data"`（含 Qdrant + SQLite 元数据）
 - 所有模型加载均基于此路径，不在各模块中硬编码
 - fastembed 的 `cache_dir` 参数指向 `MODEL_ROOT`
 
 ### 下载策略
 
 - **服务启动时自动检测**：通过 fastembed 内部机制，模型缺失则自动下载
-- `main.py` lifespan 中调用 `warmup()` 预加载 embedding 和 reranker 模型
-
-> **与原设计的差异**：未实现 `bootstrap.sh` 预下载脚本、模型版本锁定（revision pinning）和启动完整性校验。模型的下载和校验完全委托给 fastembed 内部管理。
+- `app.py` lifespan 中调用 `warmup()` 预加载 embedding 和 reranker 模型
+- 也可通过 `hermit download` 命令提前下载
 
 ---
 
 ## 服务层（FastAPI）
 
-单进程，模型启动时预加载。`main.py` 作为入口，使用 `asynccontextmanager` lifespan 管理启动/关闭。
-
-### API 接口
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `POST` | `/search` | 语义检索（query, top_k, w_dense, w_sparse, collection, rerank_candidates） |
-| `POST` | `/collections` | 创建知识库（name, folder_path, chunk_size, chunk_overlap） |
-| `DELETE` | `/collections/{name}` | 删除知识库（含 Qdrant collection + SQLite 元数据） |
-| `POST` | `/collections/{name}/sync` | 手动触发同步 |
-| `GET` | `/collections/{name}/status` | 查看索引状态（indexed_files, total_chunks, watching） |
+单进程，模型启动时预加载。`app.py` 使用 `asynccontextmanager` lifespan 管理启动/关闭。知识库管理（注册、删除、更新）通过 CLI 完成，不暴露写操作 HTTP 端点。
 
 ### 检索流程
 
 1. fastembed 编码 query → dense 向量 + sparse 向量
-2. Qdrant prefetch 双路召回 → RRF 融合 → Top 20-30 候选
+2. Qdrant prefetch 双路召回 → RRF 融合 → Top 50 候选
 3. Cross-Encoder 对候选集精排
 4. 返回 Top-K 结果（含切片原文、来源文件路径、切片位置、融合分数）
 
-### 已知限制
+### 持久化与启动恢复
 
-- **Collection 注册表不持久化**：`_collections` dict 存于内存，服务重启后丢失。Qdrant 数据和 SQLite 元数据持久化在磁盘，但 collection→folder 映射需重新创建。
-- **Watchdog 状态不持久化**：重启后需重新调用 `POST /collections` 恢复监听。
+- **Collection 注册表持久化**：`~/.hermit/data/collections.json` 记录所有已注册知识库（folder_path、ignore_patterns、ignore_extensions）。服务启动时自动加载并恢复所有 collection，无需重新注册。
+- **Watchdog 自动恢复**：服务启动时为每个已注册 collection 自动启动文件监听。
+- **模型变更检测**：`~/.hermit/data/model_signature.json` 记录上次使用的 embedding 模型。若模型发生变更，启动时自动触发所有 collection 的全量重建索引。
 
 ---
 
@@ -228,14 +191,14 @@
 
 | 组件 | 实际占用 |
 |---|---|
-| bge-small-zh-v1.5 (Dense) | ~90MB |
+| jina-embeddings-v2-base-zh (Dense) | ~640MB |
 | Qdrant/bm25 (Sparse) | <50MB |
-| ms-marco-MiniLM-L-12-v2 (Reranker) | ~120MB |
+| jina-reranker-v2-base-multilingual (Reranker) | ~700MB |
 | Qdrant（嵌入式） | ~100-500MB（取决于数据量） |
 | 系统 + FastAPI + ONNX Runtime | ~500MB |
-| **总计** | **<1.5GB** |
+| **总计** | **~2-2.5GB** |
 
-远低于 64GB 上限，无内存压力。如升级到更大模型（如 jina-embeddings-v2-base-zh + jina-reranker），预计增加到 ~2-3GB。
+远低于 64GB 上限，无内存压力。
 
 ---
 
@@ -243,27 +206,42 @@
 
 ```text
 hermit/
-├── main.py                    # FastAPI 入口 + lifespan（模型预加载）
+├── main.py                    # 开发模式入口（uvicorn 直接运行）
 ├── pyproject.toml
 ├── hermit/
-│   ├── config.py              # 配置管理（MODEL_ROOT、模型名、默认参数）
+│   ├── app.py                 # FastAPI 应用 + lifespan（模型预加载、collection 恢复）
+│   ├── cli.py                 # CLI 入口（hermit start/stop/kb/search/...）
+│   ├── config.py              # 配置管理（HERMIT_HOME、MODEL_ROOT、DATA_ROOT、模型名、默认参数）
+│   ├── models.py              # 模型下载与校验（huggingface_hub）
 │   ├── ingestion/
 │   │   ├── scanner.py         # 文件夹扫描 + 变更检测 + 索引
 │   │   ├── watcher.py         # watchdog 实时监听（2s 防抖）
-│   │   └── chunker.py         # 固定大小文本切片 + overlap
+│   │   ├── chunker.py         # token 级文本切片 + overlap
+│   │   └── task_queue.py      # 后台索引任务队列（线程池）
 │   ├── retrieval/
 │   │   ├── embedder.py        # Dense (TextEmbedding) + Sparse (SparseTextEmbedding)
 │   │   ├── searcher.py        # Qdrant prefetch + RRF 融合 + rerank
 │   │   └── reranker.py        # TextCrossEncoder
 │   ├── storage/
 │   │   ├── qdrant.py          # Qdrant 嵌入式客户端 + collection 管理
-│   │   └── metadata.py        # SQLite 元数据管理
+│   │   ├── metadata.py        # SQLite 元数据管理
+│   │   ├── registry.py        # 知识库注册表（~/.hermit/data/collections.json）
+│   │   └── model_signature.py # 模型变更检测（~/.hermit/data/model_signature.json）
 │   └── api/
 │       ├── routes.py          # API 路由
 │       └── schemas.py         # Pydantic 请求/响应模型
-├── models/                    # 模型文件（.gitignore 排除）
-├── data/
-│   ├── qdrant/                # Qdrant 嵌入式存储
-│   └── metadata/              # SQLite 元数据库 ({collection}.db)
+├── models/                    # 开发时模型缓存（生产在 ~/.hermit/models/）
 └── docs/
     └── design.md
+
+~/.hermit/                     # 运行时数据（HERMIT_HOME，可通过环境变量覆盖）
+├── models/                    # 模型文件（fastembed ONNX cache）
+├── data/
+│   ├── qdrant/                # Qdrant 嵌入式存储
+│   ├── metadata/              # SQLite 元数据库（{collection}.db）
+│   ├── collections.json       # 知识库注册表
+│   └── model_signature.json   # 模型签名（变更检测）
+├── logs/
+│   └── hermit.log             # 服务日志
+└── hermit.pid                 # 进程 PID 文件
+```
