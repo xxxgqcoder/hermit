@@ -37,8 +37,14 @@ def _create_collection_unlocked(c: QdrantClient, name: str):
     from hermit.config import DENSE_DIM
     c.create_collection(
         collection_name=name,
+        hnsw_config=models.HnswConfigDiff(on_disk=True),
+        optimizers_config=models.OptimizersConfigDiff(default_segment_number=2),
         vectors_config={
-            "dense": models.VectorParams(size=DENSE_DIM, distance=models.Distance.COSINE),
+            "dense": models.VectorParams(
+                size=DENSE_DIM, 
+                distance=models.Distance.COSINE,
+                on_disk=True
+            ),
         },
         sparse_vectors_config={
             "sparse": models.SparseVectorParams(),
