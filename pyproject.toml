@@ -14,10 +14,15 @@ dependencies = [
     "qdrant-client>=1.13",
     "fastembed>=0.6",
     "huggingface_hub>=0.20",
+    "onnx>=1.21.0",
 ]
 
 [project.scripts]
 hermit = "hermit.cli:main"
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple"
+default = true
 
 [tool.hatch.build.targets.wheel.force-include]
 ".agents/skills/hermit-search" = "hermit/_skills/hermit-search"

@@ -24,12 +24,29 @@ def _get_dense_model() -> TextEmbedding:
     if _dense_model is None:
         with _model_lock:
             if _dense_model is None:
-                logger.info("Loading dense embedding model: %s (threads=%d)", DENSE_MODEL, ONNX_THREADS)
-                _dense_model = TextEmbedding(
-                    model_name=DENSE_MODEL,
-                    cache_dir=str(MODEL_ROOT),
-                    threads=ONNX_THREADS,
-                )
+                from hermit.storage.quantizer import get_quantized_dir, is_quantized
+                if is_quantized(DENSE_MODEL):
+                    q_dir = get_quantized_dir(DENSE_MODEL)
+                    logger.info(
+                        "Loading quantized dense model from %s (threads=%d)",
+                        q_dir, ONNX_THREADS,
+                    )
+                    _dense_model = TextEmbedding(
+                        model_name=DENSE_MODEL,
+                        cache_dir=str(MODEL_ROOT),
+                        threads=ONNX_THREADS,
+                        specific_model_path=str(q_dir),
+                    )
+                else:
+                    logger.info(
+                        "Loading dense embedding model: %s (threads=%d)",
+                        DENSE_MODEL, ONNX_THREADS,
+                    )
+                    _dense_model = TextEmbedding(
+                        model_name=DENSE_MODEL,
+                        cache_dir=str(MODEL_ROOT),
+                        threads=ONNX_THREADS,
+                    )
                 logger.info("Dense embedding model loaded.")
     return _dense_model
 

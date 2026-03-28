@@ -124,6 +124,23 @@ def ensure_models():
     logger.info("All missing models downloaded.")
 
 
+def ensure_quantized_models():
+    """Quantize ONNX models to INT8 once; subsequent calls are no-ops."""
+    from hermit.storage.quantizer import is_quantized, quantize
+
+    for repo_id in [DENSE_MODEL, RERANKER_MODEL]:
+        if is_quantized(repo_id):
+            logger.info("INT8 quantized model already present for %s", repo_id)
+            continue
+        logger.info(
+            "Running one-time INT8 quantization for %s — this may take a few minutes...",
+            repo_id,
+        )
+        success = quantize(repo_id, model_file="onnx/model.onnx")
+        if not success:
+            logger.warning("Quantization failed for %s — fp32 will be used instead", repo_id)
+
+
 def verify_models():
     """Quick smoke test: load each model and run a dummy inference."""
     from fastembed import SparseTextEmbedding, TextEmbedding
