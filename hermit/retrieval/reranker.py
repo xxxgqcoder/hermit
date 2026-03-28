@@ -11,11 +11,21 @@ _reranker: TextCrossEncoder | None = None
 def _get_reranker() -> TextCrossEncoder:
     global _reranker
     if _reranker is None:
-        logger.info("Loading reranker model: %s", RERANKER_MODEL)
-        _reranker = TextCrossEncoder(
-            model_name=RERANKER_MODEL,
-            cache_dir=str(MODEL_ROOT),
-        )
+        from hermit.storage.quantizer import get_quantized_dir, is_quantized
+        if is_quantized(RERANKER_MODEL):
+            q_dir = get_quantized_dir(RERANKER_MODEL)
+            logger.info("Loading quantized reranker model from %s", q_dir)
+            _reranker = TextCrossEncoder(
+                model_name=RERANKER_MODEL,
+                cache_dir=str(MODEL_ROOT),
+                specific_model_path=str(q_dir),
+            )
+        else:
+            logger.info("Loading reranker model: %s", RERANKER_MODEL)
+            _reranker = TextCrossEncoder(
+                model_name=RERANKER_MODEL,
+                cache_dir=str(MODEL_ROOT),
+            )
         logger.info("Reranker model loaded.")
     return _reranker
 

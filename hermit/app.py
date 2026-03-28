@@ -38,8 +38,9 @@ async def lifespan(app: FastAPI):
     _server_start_time = time.time()
 
     # Auto-download missing models before loading them
-    from hermit.models import ensure_models
+    from hermit.models import ensure_models, ensure_quantized_models
     ensure_models()
+    ensure_quantized_models()
 
     logger.info("Starting Hermit — loading models...")
     embedder.warmup()
