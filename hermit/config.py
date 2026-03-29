@@ -30,8 +30,9 @@ DEFAULT_W_SPARSE = 0.3
 DEFAULT_RERANK_CANDIDATES = 50
 
 # Search thread pool — concurrent reranker calls (ONNX releases GIL → true parallel)
-# Default: half the CPU cores, minimum 2
-SEARCH_THREADS: int = int(os.environ.get("SEARCH_THREADS", min(4, (os.cpu_count() or 4) // 2)))
+# Default: min(4, cpu_count // 2)
+_cpu = os.cpu_count() or 4
+SEARCH_THREADS: int = int(os.environ.get("SEARCH_THREADS", min(4, _cpu // 2)))
 
 # Embedding models (fastembed-supported)
 DENSE_MODEL = "jinaai/jina-embeddings-v2-base-zh"
@@ -68,9 +69,11 @@ del _local_hosts
 # Indexing concurrency
 INDEX_WORKERS = int(os.environ.get("HERMIT_INDEX_WORKERS", 2))
 
-# ONNX Runtime thread control — prevents oversubscription on Linux.
-# Default: half of available CPU cores (min 2).
-ONNX_THREADS = int(os.environ.get("HERMIT_ONNX_THREADS", max(2, os.cpu_count() // 2)))
+# ONNX Runtime thread control — intra/inter-op threads per ONNX session.
+# Derived from SEARCH_THREADS so that total threads ≤ cpu_count:
+#   ONNX_THREADS = cpu_count // SEARCH_THREADS  (min 1)
+# Override with HERMIT_ONNX_THREADS env var.
+ONNX_THREADS: int = int(os.environ.get("HERMIT_ONNX_THREADS", max(1, _cpu // SEARCH_THREADS)))
 
 # Polling interval for knowledge base file change detection (seconds)
 # Default: 900s (15 minutes). Override with HERMIT_POLL_INTERVAL env var.

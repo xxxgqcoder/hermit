@@ -1,7 +1,7 @@
 import logging
 from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-from hermit.config import MODEL_ROOT, RERANKER_MODEL
+from hermit.config import MODEL_ROOT, ONNX_THREADS, RERANKER_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -14,17 +14,25 @@ def _get_reranker() -> TextCrossEncoder:
         from hermit.storage.quantizer import get_quantized_dir, is_quantized
         if is_quantized(RERANKER_MODEL):
             q_dir = get_quantized_dir(RERANKER_MODEL)
-            logger.info("Loading quantized reranker model from %s", q_dir)
+            logger.info(
+                "Loading quantized reranker model from %s (threads=%d)",
+                q_dir, ONNX_THREADS,
+            )
             _reranker = TextCrossEncoder(
                 model_name=RERANKER_MODEL,
                 cache_dir=str(MODEL_ROOT),
+                threads=ONNX_THREADS,
                 specific_model_path=str(q_dir),
             )
         else:
-            logger.info("Loading reranker model: %s", RERANKER_MODEL)
+            logger.info(
+                "Loading reranker model: %s (threads=%d)",
+                RERANKER_MODEL, ONNX_THREADS,
+            )
             _reranker = TextCrossEncoder(
                 model_name=RERANKER_MODEL,
                 cache_dir=str(MODEL_ROOT),
+                threads=ONNX_THREADS,
             )
         logger.info("Reranker model loaded.")
     return _reranker
