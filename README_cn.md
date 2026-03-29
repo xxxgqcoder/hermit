@@ -9,6 +9,8 @@ Hermit 是一个**自包含、纯本地运行的语义检索服务**，用于把
 ## 特性
 
 - **完全本地运行**：模型、向量数据和元数据都保存在项目目录中
+- **双向量存储模式**：自动处理嵌入式 (Local) 和独立部署 (Standalone Docker) Qdrant 后端。
+- **多线程搜索加速**：通过 `ThreadPoolExecutor` 并行执行基于 ONNX 的重排推理，绕过 GIL，搜索吞吐量提升约 3 倍。
 - **多 collection 支持**：一个目录对应一个 collection
 - **混合检索**：dense + sparse 双路召回
 - **重排**：使用 cross-encoder 对融合后的候选结果进行 rerank
@@ -63,16 +65,28 @@ Hermit 的搜索流程如下：
 ## 技术栈
 
 - **API 框架**: FastAPI
-- **向量数据库**: Qdrant embedded mode
-- **推理后端**: fastembed
+- **向量数据库**: Qdrant (双模式: 内置嵌入式 or 独立 Docker 容器)
+- **推理后端**: fastembed (基于 ONNX, 支持 `ThreadPoolExecutor` 并行化)
 - **元数据存储**: SQLite
 - **文件监听**: 定期轮询 (Polling)
 
-当前使用的模型：
+## 向量存储模式
 
-- Dense embedding: `jinaai/jina-embeddings-v2-base-zh`
-- Sparse embedding: `Qdrant/bm25`
-- Reranker: `jinaai/jina-reranker-v2-base-multilingual`
+Hermit 会根据环境变量自动切换存储模式：
+
+1. **Local 模式 (默认)**：直接在 `data/qdrant/` 使用嵌入式客户端，无需配置。
+2. **Standalone 模式**：如果设置了 `QDRANT_HOST`（例如 `QDRANT_HOST=localhost`），Hermit 将自动管理一个独立运行的 Qdrant Docker 容器。该模式在处理大规模索引请求时性能更佳，且方便持久化管理。
+
+强制启动 Standalone 模式：
+```bash
+QDRANT_HOST=localhost hermit start
+```
+
+## 性能与并行处理
+
+Hermit 针对高并发搜索场景（例如作为多个 Agent 的后端）进行了优化：
+- **并行重排 (Parallel Reranking)**：利用 `SEARCH_THREADS`（计算规则：`min(4, CPU核心数 // 2)`）同时执行多个 Cross-Encoder 推理。
+- **突破 GIL 限制**：由于核心推理通过 ONNX Runtime 的 C++ 库处理，即使在单 Python 进程内也可实现真正的并行化。
 
 ## 项目结构
 
