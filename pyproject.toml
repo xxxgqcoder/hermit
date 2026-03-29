@@ -26,3 +26,8 @@ default = true
 
 [tool.hatch.build.targets.wheel.force-include]
 ".agents/skills/hermit-search" = "hermit/_skills/hermit-search"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

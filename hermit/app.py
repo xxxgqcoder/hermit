@@ -5,11 +5,13 @@ Run via: uvicorn hermit.app:app --host 0.0.0.0 --port 8000
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from hermit.api.routes import router
+from hermit.config import SEARCH_THREADS
 from hermit.ingestion.task_queue import start_task_worker
 from hermit.retrieval import embedder, reranker
 
@@ -22,6 +24,12 @@ logger = logging.getLogger(__name__)
 # ── Server state ────────────────────────────────────────────────
 _server_start_time: float | None = None
 _server_ready: bool = False
+_search_executor: ThreadPoolExecutor | None = None
+
+
+def get_search_executor() -> ThreadPoolExecutor:
+    assert _search_executor is not None, "search executor not initialised"
+    return _search_executor
 
 
 def get_server_state() -> dict:
@@ -34,8 +42,14 @@ def get_server_state() -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _server_start_time, _server_ready
+    global _server_start_time, _server_ready, _search_executor
     _server_start_time = time.time()
+
+    _search_executor = ThreadPoolExecutor(
+        max_workers=SEARCH_THREADS,
+        thread_name_prefix="search",
+    )
+    logger.info("Search thread pool: %d threads", SEARCH_THREADS)
 
     # Auto-download missing models before loading them
     from hermit.models import ensure_models, ensure_quantized_models
@@ -103,6 +117,8 @@ async def lifespan(app: FastAPI):
     logger.info("Hermit ready.")
     yield
     logger.info("Shutting down Hermit.")
+    if _search_executor:
+        _search_executor.shutdown(wait=False)
 
 
 app = FastAPI(title="Hermit", version="0.1.0", lifespan=lifespan)

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from fastapi import APIRouter, HTTPException
 
@@ -25,16 +26,21 @@ _collections: dict[str, dict] = {}
 
 
 @router.post("/search", response_model=SearchResponse)
-def do_search(req: SearchRequest):
+async def do_search(req: SearchRequest):
     if req.collection not in _collections:
         raise HTTPException(status_code=404, detail=f"Collection '{req.collection}' not found")
-    results = search(
-        collection_name=req.collection,
-        query=req.query,
-        top_k=req.top_k,
-        w_dense=req.w_dense,
-        w_sparse=req.w_sparse,
-        rerank_candidates=req.rerank_candidates,
+    from hermit.app import get_search_executor
+    loop = asyncio.get_running_loop()
+    results = await loop.run_in_executor(
+        get_search_executor(),
+        lambda: search(
+            collection_name=req.collection,
+            query=req.query,
+            top_k=req.top_k,
+            w_dense=req.w_dense,
+            w_sparse=req.w_sparse,
+            rerank_candidates=req.rerank_candidates,
+        ),
     )
     return SearchResponse(results=[SearchResult(**r) for r in results])
 

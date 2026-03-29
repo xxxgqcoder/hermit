@@ -29,6 +29,10 @@ DEFAULT_W_DENSE = 0.7
 DEFAULT_W_SPARSE = 0.3
 DEFAULT_RERANK_CANDIDATES = 50
 
+# Search thread pool — concurrent reranker calls (ONNX releases GIL → true parallel)
+# Default: half the CPU cores, minimum 2
+SEARCH_THREADS: int = int(os.environ.get("SEARCH_THREADS", min(4, (os.cpu_count() or 4) // 2)))
+
 # Embedding models (fastembed-supported)
 DENSE_MODEL = "jinaai/jina-embeddings-v2-base-zh"
 DENSE_DIM = 768
@@ -41,6 +45,25 @@ RERANKER_MODEL = "jinaai/jina-reranker-v2-base-multilingual"
 MAX_COLLECTIONS = 4
 MAX_COLLECTION_NAME_LENGTH = 64
 COLLECTION_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+
+# Qdrant connection — Local mode (default) vs Stand-alone mode
+# Set QDRANT_HOST to connect to an external Qdrant server (e.g. Docker).
+# When unset/empty, Hermit uses the embedded local mode (path-based client).
+QDRANT_HOST: str | None = os.environ.get("QDRANT_HOST") or None
+QDRANT_PORT: int = int(os.environ.get("QDRANT_PORT", 6333))
+QDRANT_GRPC_PORT: int = int(os.environ.get("QDRANT_GRPC_PORT", 6334))
+
+# Hermit-managed Qdrant Docker container (Stand-alone mode only).
+# Set QDRANT_MANAGED=true to let Hermit start/stop the container automatically.
+# Defaults to true when QDRANT_HOST is localhost/127.0.0.1; false for remote hosts.
+QDRANT_CONTAINER_NAME: str = os.environ.get("QDRANT_CONTAINER_NAME", "hermit_qdrant")
+QDRANT_IMAGE: str = os.environ.get("QDRANT_IMAGE", "qdrant/qdrant:v1.17.0")
+_local_hosts = {"localhost", "127.0.0.1"}
+QDRANT_MANAGED: bool = os.environ.get(
+    "QDRANT_MANAGED",
+    "true" if (os.environ.get("QDRANT_HOST") or "").lower() in _local_hosts else "false",
+).lower() == "true"
+del _local_hosts
 
 # Indexing concurrency
 INDEX_WORKERS = int(os.environ.get("HERMIT_INDEX_WORKERS", 2))
