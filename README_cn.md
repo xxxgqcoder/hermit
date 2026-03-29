@@ -353,6 +353,26 @@ curl http://127.0.0.1:8000/collections/my_docs/status
 curl http://127.0.0.1:8000/collections/my_docs/tasks
 ```
 
+### `GET /health`
+
+服务健康状态与运行信息。
+
+返回字段：
+
+- `status` — `"ready"` 或 `"starting"`
+- `uptime` — 服务启动后经过的秒数
+- `models_loaded` — 模型是否已加载完成
+- `collections` — 各 collection 的 `{name, indexed_files, total_chunks}`
+- `pending_index_tasks` — 全部 collection 待处理的后台索引任务总数
+- `qdrant_mode` — `"local"`（嵌入式）或 `"standalone"`（外部 Qdrant 服务）
+- `qdrant_host` — standalone 模式下的 host 地址；local 模式下为 `null`
+
+示例：
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
 ## 数据存储
 
 默认情况下，Hermit 将运行数据保存在项目目录中：

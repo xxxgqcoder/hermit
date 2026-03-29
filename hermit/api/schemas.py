@@ -63,3 +63,5 @@ class HealthResponse(BaseModel):
     models_loaded: bool
     collections: list[HealthCollectionInfo]
     pending_index_tasks: int
+    qdrant_mode: str  # "local" or "standalone"
+    qdrant_host: str | None  # None in local mode
