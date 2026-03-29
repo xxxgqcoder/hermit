@@ -6,7 +6,6 @@ shuts it down on process exit.
 """
 
 import logging
-import os
 import shutil
 import socket
 import subprocess
@@ -100,8 +99,6 @@ def ensure_qdrant_running(
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
 
     qdrant_data_path.mkdir(parents=True, exist_ok=True)
-    uid = os.getuid()
-    gid = os.getgid()
     logger.info(
         "Creating Qdrant container '%s' from image '%s' "
         "(port %d→6333, %d→6334, data: %s)...",
@@ -112,7 +109,6 @@ def ensure_qdrant_running(
             [
                 "docker", "run", "-d",
                 "--name", container_name,
-                "--user", f"{uid}:{gid}",
                 "-p", f"{port}:6333",
                 "-p", f"{grpc_port}:6334",
                 "-v", f"{qdrant_data_path}:/qdrant/storage:z",
