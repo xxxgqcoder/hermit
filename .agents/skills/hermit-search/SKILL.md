@@ -186,6 +186,7 @@ hermit --pretty search my-notes "query"
 - **Embedding 模型**：jinaai/jina-embeddings-v2-base-zh（768 维）
 - **Sparse 模型**：Qdrant/bm25
 - **Reranker**：jinaai/jina-reranker-v2-base-multilingual
-- **向量数据库**：Qdrant（嵌入式模式）
+- **向量数据库**：Qdrant（本地嵌入式模式 或 Standalone Docker 模式）
 - **推理后端**：fastembed（ONNX Runtime，纯 CPU）
 - **数据目录**：`~/.hermit/`（可通过 `HERMIT_HOME` 环境变量覆盖）
+- **部署模式查询**：`GET /health` 返回 `qdrant_mode`（`"local"` / `"standalone"`）和 `qdrant_host`

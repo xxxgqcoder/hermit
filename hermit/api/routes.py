@@ -93,12 +93,15 @@ def health():
         task_status = get_collection_task_status(name)
         total_pending += task_status["pending_tasks"]
 
+    from hermit.config import QDRANT_HOST
     return HealthResponse(
         status="ready" if state["ready"] else "starting",
         uptime=state["uptime"],
         models_loaded=state["ready"],
         collections=collections_info,
         pending_index_tasks=total_pending,
+        qdrant_mode="standalone" if QDRANT_HOST else "local",
+        qdrant_host=QDRANT_HOST,
     )
 
 

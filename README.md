@@ -360,6 +360,26 @@ Example:
 curl http://127.0.0.1:8000/collections/my_docs/tasks
 ```
 
+### `GET /health`
+
+Server health and runtime info.
+
+Response fields:
+
+- `status` — `"ready"` or `"starting"`
+- `uptime` — seconds since server start
+- `models_loaded` — whether embedding/reranker models are loaded
+- `collections` — list of `{name, indexed_files, total_chunks}` per collection
+- `pending_index_tasks` — total background indexing tasks waiting across all collections
+- `qdrant_mode` — `"local"` (embedded) or `"standalone"` (external Qdrant server)
+- `qdrant_host` — host address in standalone mode; `null` in local mode
+
+Example:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
 ## Storage layout
 
 By default, Hermit stores its runtime data inside the project directory:
