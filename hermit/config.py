@@ -42,6 +42,25 @@ MAX_COLLECTIONS = 4
 MAX_COLLECTION_NAME_LENGTH = 64
 COLLECTION_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 
+# Qdrant connection — Local mode (default) vs Stand-alone mode
+# Set QDRANT_HOST to connect to an external Qdrant server (e.g. Docker).
+# When unset/empty, Hermit uses the embedded local mode (path-based client).
+QDRANT_HOST: str | None = os.environ.get("QDRANT_HOST") or None
+QDRANT_PORT: int = int(os.environ.get("QDRANT_PORT", 6333))
+QDRANT_GRPC_PORT: int = int(os.environ.get("QDRANT_GRPC_PORT", 6334))
+
+# Hermit-managed Qdrant Docker container (Stand-alone mode only).
+# Set QDRANT_MANAGED=true to let Hermit start/stop the container automatically.
+# Defaults to true when QDRANT_HOST is localhost/127.0.0.1; false for remote hosts.
+QDRANT_CONTAINER_NAME: str = os.environ.get("QDRANT_CONTAINER_NAME", "hermit_qdrant")
+QDRANT_IMAGE: str = os.environ.get("QDRANT_IMAGE", "qdrant/qdrant:v1.17.0")
+_local_hosts = {"localhost", "127.0.0.1"}
+QDRANT_MANAGED: bool = os.environ.get(
+    "QDRANT_MANAGED",
+    "true" if (os.environ.get("QDRANT_HOST") or "").lower() in _local_hosts else "false",
+).lower() == "true"
+del _local_hosts
+
 # Indexing concurrency
 INDEX_WORKERS = int(os.environ.get("HERMIT_INDEX_WORKERS", 2))
 
