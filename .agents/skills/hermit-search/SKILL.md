@@ -49,12 +49,20 @@ hermit download
 ### 1. 启动服务
 
 ```sh
+# 默认启动 (本地 Local 模式)
 hermit start
+
+# 以独立模式启动 (Qdrant Standalone Docker)
+QDRANT_HOST=localhost hermit start
 ```
 
 输出示例：`{"status": "started", "pid": 12345, "port": 8000}`
 
-### 2. 添加知识库
+### 2. 搜索性能优化
+
+Hermit 会根据 CPU 核心数自动配置 `SEARCH_THREADS` 并行搜索线程（默认为核心数的一半，最高不超过 4），以充分利用多核性能进行并发重排 (Reranking)。
+
+### 3. 添加知识库
 
 将一个文件夹注册为知识库 collection：
 

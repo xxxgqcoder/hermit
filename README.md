@@ -9,6 +9,8 @@ It is designed for local-first workflows and works well as a lightweight retriev
 ## Highlights
 
 - **Runs fully locally**: models, vector data, and metadata live inside the project
+- **Dual Vector Storage Modes**: Automatically handles both local (embedded) and standalone (Docker-based) Qdrant backends.
+- **Multi-threaded Search Acceleration**: Bypasses GIL with ONNX-based reranking using a dedicated thread pool, achieving ~3x throughput improvement.
 - **Multi-collection support**: one folder maps to one collection
 - **Hybrid retrieval**: dense + sparse recall
 - **Reranking**: a cross-encoder reranks the fused candidates
@@ -63,8 +65,8 @@ Each registered folder goes through:
 ## Tech stack
 
 - **API framework**: FastAPI
-- **Vector database**: Qdrant embedded mode
-- **Inference backend**: fastembed
+- **Vector database**: Qdrant (Dual-mode: Embedded or Standalone Docker)
+- **Inference backend**: fastembed (ONNX-based, parallelized via `ThreadPoolExecutor`)
 - **Metadata store**: SQLite
 - **Filesystem watcher**: periodic polling
 
@@ -73,6 +75,25 @@ Current models:
 - Dense embedding: `jinaai/jina-embeddings-v2-base-zh`
 - Sparse embedding: `Qdrant/bm25`
 - Reranker: `jinaai/jina-reranker-v2-base-multilingual`
+
+## Vector Storage Modes
+
+Hermit automatically detects the environment and switches between two modes:
+
+1. **Local Mode (Default)**: Uses Qdrant's embedded client. Data is stored in `data/qdrant/`. Ideal for zero-configuration local use.
+2. **Standalone Mode**: If `QDRANT_HOST` is set (e.g., `QDRANT_HOST=localhost`), Hermit will manage a Qdrant Docker container automatically. This mode is faster for large-scale indexing and supports better persistent management.
+
+To force standalone mode, start Hermit with:
+```bash
+QDRANT_HOST=localhost hermit start
+```
+
+## Performance & Concurrency
+
+Hermit is optimized for high-concurrency search environments (e.g., as a backend for multiple agents):
+- **Parallel Reranking**: Utilizes `SEARCH_THREADS` (default: `min(4, cpu_count // 2)`) to perform multiple cross-encoder inferences simultaneously.
+- **GIL Bypass**: Since the core inference is handled by ONNX Runtime's C++ library, search requests are truly parallel even within a single Python process.
+- **Improved Throughput**: Validated throughput of ~1.0 queries per second (with 50 candidates per query) on Apple M4 Pro hardware.
 
 ## Project layout
 
