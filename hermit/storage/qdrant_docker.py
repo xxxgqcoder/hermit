@@ -93,6 +93,12 @@ def ensure_qdrant_running(
             "请安装并启动 Docker Desktop，然后重试。"
         )
 
+    # Fast path: Qdrant already healthy (e.g. another worker beat us here).
+    # Skip rm-f + run to avoid tearing down a live container.
+    if _wait_for_qdrant_ready(host, port, timeout=2.0):
+        logger.info("Qdrant already healthy at %s:%d — skipping container recreation.", host, port)
+        return
+
     # Remove any pre-existing container with this name (stopped or running)
     if _container_exists(container_name):
         logger.info("Removing existing Qdrant container '%s'...", container_name)

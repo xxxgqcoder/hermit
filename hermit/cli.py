@@ -127,7 +127,9 @@ def cmd_start(_args):
 
     log_file = LOG_DIR / "hermit.log"
 
-    # Spawn uvicorn as a detached process
+    # Spawn uvicorn as a single-process daemon.
+    # Concurrency is handled by an internal ThreadPoolExecutor (search) and
+    # daemon threads (indexing/watching), avoiding multi-process duplication.
     with open(log_file, "a") as lf:
         proc = subprocess.Popen(
             [

@@ -29,6 +29,10 @@ DEFAULT_W_DENSE = 0.7
 DEFAULT_W_SPARSE = 0.3
 DEFAULT_RERANK_CANDIDATES = 50
 
+# Search thread pool — concurrent reranker calls (ONNX releases GIL → true parallel)
+# Default: half the CPU cores, minimum 2
+SEARCH_THREADS: int = int(os.environ.get("SEARCH_THREADS", min(4, (os.cpu_count() or 4) // 2)))
+
 # Embedding models (fastembed-supported)
 DENSE_MODEL = "jinaai/jina-embeddings-v2-base-zh"
 DENSE_DIM = 768
