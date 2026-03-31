@@ -76,7 +76,10 @@ QDRANT_MANAGED: bool = os.environ.get(
 del _local_hosts
 
 # Indexing concurrency
-INDEX_WORKERS = int(os.environ.get("HERMIT_INDEX_WORKERS", 2))
+# Default 1: personal-use scenario where incremental updates are infrequent.
+# A single worker avoids contention with search requests on the shared ONNX session.
+# Override with HERMIT_INDEX_WORKERS=2 (or more) for initial bulk indexing.
+INDEX_WORKERS = int(os.environ.get("HERMIT_INDEX_WORKERS", 1))
 
 # Polling interval for knowledge base file change detection (seconds)
 # Default: 900s (15 minutes). Override with HERMIT_POLL_INTERVAL env var.

@@ -61,6 +61,16 @@ async def lifespan(app: FastAPI):
     reranker.warmup()
     start_task_worker()
 
+    # In standalone mode, initialise the Qdrant connection eagerly so that
+    # any Docker image pull or container startup happens here — with clear
+    # log output — rather than silently inside the first collection scan.
+    from hermit.config import QDRANT_HOST
+    if QDRANT_HOST:
+        logger.info("Standalone 模式：提前初始化 Qdrant 连接 (%s)...", QDRANT_HOST)
+        from hermit.storage.qdrant import client as _qdrant_client
+        _qdrant_client()  # triggers ensure_qdrant_running + image pull if needed
+        logger.info("Qdrant 连接已就绪。")
+
     # Check if embedding models changed since last run
     from hermit.storage.model_signature import check_model_changed, save_signature
     model_changed, old_sig, new_sig = check_model_changed()

@@ -111,12 +111,14 @@ def quantize(repo_id: str, model_file: str = "onnx/model.onnx") -> bool:
 
     try:
         from onnxruntime.quantization import QuantType, quantize_dynamic
+        from hermit.models import _log_heartbeat
 
-        quantize_dynamic(
-            str(src_resolved),
-            str(tmp_onnx),
-            weight_type=QuantType.QInt8,
-        )
+        with _log_heartbeat(f"Quantizing {repo_id} to INT8..."):
+            quantize_dynamic(
+                str(src_resolved),
+                str(tmp_onnx),
+                weight_type=QuantType.QInt8,
+            )
         tmp_onnx.rename(q_onnx)
     except Exception as exc:
         logger.warning("Quantization failed for %s: %s — will use fp32 model", repo_id, exc)

@@ -69,6 +69,37 @@ def _container_exists(name: str) -> bool:
     return result.returncode == 0
 
 
+def _is_image_present(image: str) -> bool:
+    """Return True if the Docker image exists locally."""
+    result = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0
+
+
+def _pull_image(image: str) -> None:
+    """Pull a Docker image, streaming progress to the log.
+
+    Runs docker pull without capturing output so that progress lines are
+    visible in the server log file, giving operators visibility into the
+    pull duration.
+
+    Raises RuntimeError on failure.
+    """
+    logger.info("镜像 '%s' 本地不存在，开始拉取（此步骤可能需要数分钟，取决于网络速度）...", image)
+    result = subprocess.run(
+        ["docker", "pull", image],
+        capture_output=False,  # stream progress to server log
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Docker 镜像 '{image}' 拉取失败（退出码 {result.returncode}）。\n"
+            f"请检查网络连接，或通过环境变量 QDRANT_IMAGE 指定正确的镜像版本。"
+        )
+    logger.info("镜像 '%s' 拉取完成。", image)
+
+
 def ensure_qdrant_running(
     host: str,
     port: int,
@@ -105,6 +136,13 @@ def ensure_qdrant_running(
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
 
     qdrant_data_path.mkdir(parents=True, exist_ok=True)
+
+    # Ensure the image is available locally before running the container.
+    # docker run silently pulls missing images with no progress output —
+    # on a fresh machine this can take minutes with zero feedback.
+    if not _is_image_present(image):
+        _pull_image(image)  # raises RuntimeError on failure
+
     logger.info(
         "Creating Qdrant container '%s' from image '%s' "
         "(port %d→6333, %d→6334, data: %s)...",
@@ -127,8 +165,8 @@ def ensure_qdrant_running(
         raise RuntimeError(
             f"Qdrant 容器 '{container_name}' 启动失败。\n"
             f"错误: {stderr}\n"
-            f"提示: 如镜像 '{image}' 不存在，请先运行 `docker pull {image}`，"
-            "或通过环境变量 QDRANT_IMAGE 指定正确的镜像版本。"
+            f"提示: 通过环境变量 QDRANT_IMAGE 指定正确的镜像版本，"
+            f"或手动运行 `docker pull {image}` 后重试。"
         ) from e
 
     _container_created = True

@@ -24,6 +24,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -47,6 +48,30 @@ logger = logging.getLogger(__name__)
 
 # ── Global output state (set by --pretty flag) ──────────────────
 _pretty = False
+
+# Uvicorn HTTP access log lines (e.g. '127.0.0.1 - "GET /health ..." 200 OK')
+# are filtered out during startup tailing so users only see hermit app logs.
+_ACCESS_LOG_RE = re.compile(r'\d+\.\d+\.\d+\.\d+.*HTTP')
+
+
+def _tail_log(log_path, last_pos: int) -> tuple[int, list[str]]:
+    """Return new lines written to log_path since last_pos (byte offset).
+
+    Filters out uvicorn HTTP access log lines to reduce noise.
+    Returns (new_byte_pos, list_of_new_lines).
+    """
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(last_pos)
+            data = f.read()
+        new_pos = last_pos + len(data)
+        lines = [
+            line for line in data.decode(errors="replace").splitlines()
+            if line.strip() and not _ACCESS_LOG_RE.search(line)
+        ]
+        return new_pos, lines
+    except OSError:
+        return last_pos, []
 
 
 # ── JSON output helpers ─────────────────────────────────────────
@@ -146,8 +171,16 @@ def cmd_start(_args):
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(proc.pid))
 
-    # Wait for server to become ready (up to 120s for model downloads)
-    for _ in range(120):
+    # Wait for server to become ready.
+    # Default 300s: standalone mode may need to pull the Qdrant Docker image
+    # on first run, which can take several minutes on slow networks.
+    # Override with HERMIT_START_TIMEOUT env var (seconds).
+    start_timeout = int(os.environ.get("HERMIT_START_TIMEOUT", 300))
+
+    log_pos: int = 0
+    last_output_t = time.monotonic()  # tracks when we last printed to stderr
+
+    for elapsed in range(start_timeout):
         time.sleep(1)
         try:
             os.kill(proc.pid, 0)
@@ -155,6 +188,21 @@ def cmd_start(_args):
             PID_FILE.unlink(missing_ok=True)
             _error(f"server process exited unexpectedly, check {log_file}")
 
+        # ── Stream new server log lines to stderr ───────────────
+        log_pos, new_lines = _tail_log(log_file, log_pos)
+        for line in new_lines:
+            print(line, file=sys.stderr, flush=True)
+            last_output_t = time.monotonic()
+
+        # Heartbeat: if the log has been silent for >10s, reassure the user.
+        if time.monotonic() - last_output_t > 10:
+            print(
+                f"[hermit] still starting... ({elapsed + 1}s elapsed)",
+                file=sys.stderr, flush=True,
+            )
+            last_output_t = time.monotonic()
+
+        # ── Poll /health ────────────────────────────────────────
         try:
             url = f"http://127.0.0.1:{port}/health"
             req = urllib.request.Request(url, method="GET")
@@ -164,10 +212,18 @@ def cmd_start(_args):
             continue
 
         if health.get("status") == "ready":
+            print(
+                f"[hermit] server ready ({elapsed + 1}s elapsed)",
+                file=sys.stderr, flush=True,
+            )
             _output({"status": "started", "pid": proc.pid, "port": port})
 
     _output({"status": "starting", "pid": proc.pid, "port": port,
-             "warning": "health check timed out, server may still be loading models"})
+             "warning": (
+                 f"health check timed out after {start_timeout}s, server may still be loading. "
+                 f"Check logs: {log_file}. "
+                 "Increase timeout with HERMIT_START_TIMEOUT env var."
+             )})
 
 
 def cmd_stop(_args):
