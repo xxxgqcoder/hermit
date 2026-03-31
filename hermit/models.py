@@ -1,6 +1,8 @@
 """Model download, verification, and self-check utilities."""
 
+import contextlib
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -57,6 +59,30 @@ def _model_cache_dir(repo_id: str) -> Path:
     return MODEL_ROOT / f"models--{repo_id.replace('/', '--')}"
 
 
+@contextlib.contextmanager
+def _log_heartbeat(message: str, interval: float = 30.0):
+    """Log *message* every *interval* seconds in a background thread.
+
+    Use as a context manager around long synchronous calls (downloads,
+    quantization) so the server log never goes silent for extended periods.
+    """
+    stop = threading.Event()
+
+    def _worker():
+        elapsed = interval
+        while not stop.wait(interval):
+            logger.info("%s (%.0fs elapsed)", message, elapsed)
+            elapsed += interval
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join(timeout=1)
+
+
 def check_models_exist() -> dict[str, bool]:
     """Check which models are present in the local cache."""
     result = {}
@@ -72,12 +98,13 @@ def download_model(repo_id: str, allow_patterns: list[str] | None, force: bool) 
     """Download a single model with retry logic. Returns snapshot path."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            path = snapshot_download(
-                repo_id=repo_id,
-                cache_dir=str(MODEL_ROOT),
-                allow_patterns=allow_patterns,
-                force_download=force,
-            )
+            with _log_heartbeat(f"Downloading {repo_id}..."):
+                path = snapshot_download(
+                    repo_id=repo_id,
+                    cache_dir=str(MODEL_ROOT),
+                    allow_patterns=allow_patterns,
+                    force_download=force,
+                )
             return path
         except Exception as e:
             if attempt == MAX_RETRIES:
