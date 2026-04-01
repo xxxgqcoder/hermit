@@ -190,10 +190,21 @@ def embed_query_sparse(query: str):
 
 
 def warmup():
-    """Pre-load models and start scheduler threads."""
+    """Pre-load models, start scheduler threads, and run a dummy inference.
+
+    Running a dummy embed call here triggers ONNX Runtime JIT graph compilation
+    so that the first real indexing/search request is served at full speed.
+    Without this, ONNX compilation happens on the first production call and can
+    stall the worker for 30–90 s, causing indexing timeouts.
+    """
     logger.info("Warming up embedding models...")
     _get_dense_model()
     _get_sparse_model()
     _dense_scheduler.start()
     _sparse_scheduler.start()
+    # Trigger ONNX JIT compilation with a dummy pass so the server is truly
+    # ready for fast inference before reporting status == "ready".
+    logger.info("Running dummy inference to compile ONNX graphs...")
+    embed_dense(["warmup"])
+    embed_sparse(["warmup"])
     logger.info("Embedding models ready.")

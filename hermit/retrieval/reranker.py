@@ -50,6 +50,9 @@ def rerank(query: str, passages: list[str], top_k: int) -> list[int]:
 
 
 def warmup():
+    """Load reranker model and run a dummy inference to compile ONNX graphs."""
     logger.info("Warming up reranker model...")
     _get_reranker()
+    # Trigger ONNX JIT compilation before server reports ready.
+    list(_get_reranker().rerank("warmup", ["warmup passage"]))
     logger.info("Reranker model ready.")
