@@ -23,6 +23,7 @@ To force-remove the container (e.g. for a clean reset) use:
 """
 
 import logging
+import os
 import shutil
 import socket
 import subprocess
@@ -193,6 +194,7 @@ def ensure_qdrant_running(
             [
                 "docker", "run", "-d",
                 "--name", container_name,
+                "--user", f"{os.getuid()}:{os.getgid()}",
                 "-p", f"{port}:6333",
                 "-p", f"{grpc_port}:6334",
                 "-v", f"{qdrant_data_path}:/qdrant/storage:z",
