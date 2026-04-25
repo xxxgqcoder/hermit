@@ -1,8 +1,25 @@
 """Hermit-managed Qdrant Docker container lifecycle.
 
 When QDRANT_MANAGED=true (auto-detected for localhost targets), Hermit
-automatically starts a Qdrant Docker container before connecting and
-shuts it down on process exit.
+automatically ensures a Qdrant Docker container is running before connecting
+and *stops* it (without removing) on process exit.
+
+Persistent-container design
+────────────────────────────
+The Qdrant container is treated as persistent storage infrastructure whose
+lifetime is independent of the hermit process:
+
+  • hermit start  — creates the container on first run; on subsequent runs
+                    it either adopts a live container (fast-path) or restarts
+                    a stopped one with `docker start`.
+  • hermit stop   — issues `docker stop` (not rm -f).  The container survives
+                    as "stopped", consuming no CPU/memory but retaining its
+                    data volume and port config.
+  • crash/SIGKILL — the container keeps running; next `hermit start` adopts
+                    it via the fast-path healthy check.
+
+To force-remove the container (e.g. for a clean reset) use:
+    docker rm -f hermit_qdrant
 """
 
 import logging
@@ -16,9 +33,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# True if Hermit successfully ran `docker run` during this process lifetime.
-# Used to guard the atexit cleanup so a failed startup doesn't trigger removal.
-_container_created: bool = False
+# True when this process has taken ownership of the container (either by
+# creating it, restarting a stopped instance, or adopting a running one).
+# Guards atexit so a failed pre-startup state doesn't trigger stop.
+_container_managed: bool = False
 
 
 def _is_docker_available() -> bool:
@@ -108,15 +126,20 @@ def ensure_qdrant_running(
     container_name: str,
     image: str,
 ) -> None:
-    """Start a fresh Qdrant Docker container. Idempotent at the container level.
+    """Ensure a Qdrant Docker container is running and healthy.  Idempotent.
 
-    Any existing container with the same name (regardless of state) is removed
-    before a new one is created.  This guarantees a clean startup on every
-    Hermit launch.
+    Priority order:
+      1. Adopt — Qdrant already healthy on the expected port (fast-path, no
+                 Docker commands needed).  This handles the crash-and-restart
+                 scenario where the container kept running after hermit died.
+      2. Restart — Container exists but is stopped; attempt `docker start`.
+                   Falls back to recreate if start fails or port doesn't
+                   become healthy (e.g. port mapping mismatch).
+      3. Create  — No container with this name; run a new one.
 
     Raises RuntimeError if Docker is unavailable or the container fails to start.
     """
-    global _container_created
+    global _container_managed
 
     if not _is_docker_available():
         raise RuntimeError(
@@ -124,17 +147,34 @@ def ensure_qdrant_running(
             "请安装并启动 Docker Desktop，然后重试。"
         )
 
-    # Fast path: Qdrant already healthy (e.g. another worker beat us here).
-    # Skip rm-f + run to avoid tearing down a live container.
+    # ── 1. Adopt: already healthy ────────────────────────────────
     if _wait_for_qdrant_ready(host, port, timeout=2.0):
-        logger.info("Qdrant already healthy at %s:%d — skipping container recreation.", host, port)
+        logger.info(
+            "Qdrant already healthy at %s:%d — adopting existing container.",
+            host, port,
+        )
+        _container_managed = True
         return
 
-    # Remove any pre-existing container with this name (stopped or running)
+    # ── 2. Restart: stopped container ───────────────────────────
     if _container_exists(container_name):
-        logger.info("Removing existing Qdrant container '%s'...", container_name)
+        logger.info("Found stopped container '%s', attempting docker start...", container_name)
+        result = subprocess.run(
+            ["docker", "start", container_name],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and _wait_for_qdrant_ready(host, port, timeout=30.0):
+            logger.info("Restarted container '%s' successfully.", container_name)
+            _container_managed = True
+            return
+        # Start failed or container came up on wrong port — recreate
+        logger.warning(
+            "Container '%s' restart failed or unhealthy on port %d — recreating.",
+            container_name, port,
+        )
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
 
+    # ── 3. Create: fresh container ───────────────────────────────
     qdrant_data_path.mkdir(parents=True, exist_ok=True)
 
     # Ensure the image is available locally before running the container.
@@ -169,7 +209,7 @@ def ensure_qdrant_running(
             f"或手动运行 `docker pull {image}` 后重试。"
         ) from e
 
-    _container_created = True
+    _container_managed = True
     logger.info("Waiting for Qdrant to become ready at %s:%d (up to 60s)...", host, port)
     if not _wait_for_port(host, port, timeout=60.0):
         raise RuntimeError(
@@ -186,15 +226,28 @@ def ensure_qdrant_running(
 
 
 def stop_qdrant_container(container_name: str) -> None:
-    """Stop and remove the Hermit-managed Qdrant container.
+    """Stop (but do NOT remove) the Hermit-managed Qdrant container.
 
-    No-op if `ensure_qdrant_running` was never successfully called in this
-    process (guards against cleanup after a failed startup).
+    Persistent-container design: the container is stopped rather than deleted
+    so that subsequent hermit starts can resume quickly via `docker start`.
+    Data is preserved on the host-mounted volume regardless.
+
+    No-op if this process never successfully managed a container (guards
+    against atexit cleanup after a failed startup).
     """
-    global _container_created
-    if not _container_created:
+    global _container_managed
+    if not _container_managed:
         return
-    logger.info("Removing Qdrant container '%s'...", container_name)
+    logger.info("Stopping Qdrant container '%s'...", container_name)
+    subprocess.run(["docker", "stop", container_name], capture_output=True)
+    _container_managed = False
+    logger.info("Qdrant container '%s' stopped (data preserved).", container_name)
+
+
+def remove_qdrant_container(container_name: str) -> None:
+    """Force-remove the Qdrant container and release its name.
+
+    Use this for a clean reset or in test teardown.  Data on the host
+    volume is NOT affected (volume is managed separately).
+    """
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
-    _container_created = False
-    logger.info("Qdrant container '%s' removed.", container_name)

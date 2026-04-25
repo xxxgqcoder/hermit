@@ -1,16 +1,6 @@
 ---
 name: hermit-search
 description: 'Local semantic search over knowledge base collections powered by Hermit. Use when: searching knowledge base, semantic search, querying documents, managing collections, adding knowledge base, indexing files.'
-version: 1.0.0
-metadata:
-  openclaw:
-    requires:
-      bins:
-        - hermit
-        - uv
-    os:
-      - macos
-    homepage: https://github.com/xxxgqcoder/hermit
 ---
 
 # Skill: hermit-search

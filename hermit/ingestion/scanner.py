@@ -4,7 +4,7 @@ import logging
 import uuid
 from pathlib import Path
 
-from hermit.ingestion.chunker import chunk_text
+from hermit.ingestion.chunker import chunk_text, chunk_markdown
 from hermit.ingestion.task_queue import enqueue_index_task
 from hermit.retrieval import embedder
 from hermit.storage.metadata import MetadataStore
@@ -65,7 +65,7 @@ def _index_file(
         logger.warning("Failed to read %s: %s", fpath_str, e)
         return False
 
-    chunks = chunk_text(text)
+    chunks = chunk_markdown(text) if file_path.suffix.lower() == '.md' else chunk_text(text)
     if not chunks:
         return False
 

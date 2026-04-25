@@ -129,6 +129,14 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Hermit.")
     if _search_executor:
         _search_executor.shutdown(wait=False)
+    # Explicitly stop the managed Qdrant container during graceful shutdown.
+    # This is more reliable than atexit (which is skipped on SIGKILL) and
+    # fires deterministically as part of the ASGI lifespan shutdown event.
+    from hermit.config import QDRANT_HOST, QDRANT_MANAGED
+    if QDRANT_HOST and QDRANT_MANAGED:
+        from hermit.config import QDRANT_CONTAINER_NAME
+        from hermit.storage.qdrant_docker import stop_qdrant_container
+        stop_qdrant_container(QDRANT_CONTAINER_NAME)
 
 
 app = FastAPI(title="Hermit", version="0.1.0", lifespan=lifespan)
