@@ -296,7 +296,12 @@ def replace_file_chunks(
             _create_collection_unlocked(c, collection_name)
             logger.info("Recreated collection '%s'", collection_name)
             raise CollectionCorruptedError(collection_name)
-        c.upsert(collection_name=collection_name, points=points)
+        # Upsert in batches to stay within Qdrant's payload size limit (32 MB).
+        _UPSERT_BATCH = 100
+        for i in range(0, max(len(points), 1), _UPSERT_BATCH):
+            batch = points[i : i + _UPSERT_BATCH]
+            if batch:
+                c.upsert(collection_name=collection_name, points=batch)
 
 
 def _build_points(ids, dense_vectors, sparse_vectors, payloads):

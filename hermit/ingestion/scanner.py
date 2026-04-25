@@ -13,6 +13,23 @@ from hermit.storage.qdrant import CollectionCorruptedError
 
 logger = logging.getLogger(__name__)
 
+# Whitelist of extensions that contain indexable plain text.
+# Files with any other extension (or no extension) are skipped with a warning.
+_TEXT_EXTENSIONS = frozenset({
+    # Notes / documentation
+    '.md', '.markdown', '.txt', '.rst', '.org',
+    # Structured text
+    '.json', '.jsonl', '.yaml', '.yml', '.toml', '.csv', '.tsv', '.xml',
+    # Web
+    '.html', '.htm',
+    # Source code
+    '.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.rs', '.java',
+    '.c', '.cpp', '.h', '.hpp', '.cs', '.rb', '.php', '.swift', '.kt',
+    '.sh', '.zsh', '.bash', '.fish',
+    # Config / logs
+    '.ini', '.cfg', '.conf', '.env', '.log',
+})
+
 
 def _file_hash(path: Path) -> str:
     h = hashlib.sha256()
@@ -39,6 +56,9 @@ def _collect_files(
             continue
         rel_parts = file_path.relative_to(folder).parts
         if any(part.startswith(".") for part in rel_parts):
+            continue
+        if file_path.suffix.lower() not in _TEXT_EXTENSIONS:
+            logger.warning("Skipping non-text file: %s", file_path)
             continue
         if _extensions and file_path.suffix.lower() in _extensions:
             continue
