@@ -13,6 +13,27 @@ from hermit.storage.qdrant import CollectionCorruptedError
 
 logger = logging.getLogger(__name__)
 
+# File extensions that contain no indexable plain text.
+# Reading these as UTF-8 produces garbage, creates oversized embeddings,
+# and causes Qdrant payload-size errors.
+_BINARY_EXTENSIONS = frozenset({
+    # Images
+    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.svg',
+    '.ico', '.heic', '.heif', '.raw',
+    # Documents (binary formats — not plain text)
+    '.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt', '.odt', '.ods', '.odp',
+    # Archives
+    '.zip', '.tar', '.gz', '.bz2', '.xz', '.rar', '.7z',
+    # Audio / video
+    '.mp3', '.mp4', '.wav', '.aac', '.ogg', '.flac', '.avi', '.mov', '.mkv', '.webm',
+    # Executables / native libraries
+    '.exe', '.dll', '.so', '.dylib', '.bin', '.out',
+    # Databases
+    '.db', '.sqlite', '.sqlite3',
+    # Other binary
+    '.dat', '.pyc', '.pyo', '.class',
+})
+
 
 def _file_hash(path: Path) -> str:
     h = hashlib.sha256()
@@ -39,6 +60,8 @@ def _collect_files(
             continue
         rel_parts = file_path.relative_to(folder).parts
         if any(part.startswith(".") for part in rel_parts):
+            continue
+        if file_path.suffix.lower() in _BINARY_EXTENSIONS:
             continue
         if _extensions and file_path.suffix.lower() in _extensions:
             continue
