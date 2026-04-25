@@ -302,23 +302,26 @@ def test_chunk_markdown_five_blocks_gives_two_chunks():
     text = "# H1\n\n# H2\n\n# H3\n\n# H4\n\n# H5\n"
     result = chunk_markdown(text)
     assert len(result) == 2
-    # chunk 0: H1..H4, chunk 1: H4..H5 (overlap = H4)
+    # chunk[0]: H1–H4; Rule 2(a) fires because H5 is a heading → chunk[1] starts at H5 directly
     assert "# H1" in result[0]
     assert "# H4" in result[0]
-    assert "# H4" in result[1]
     assert "# H5" in result[1]
+    assert "# H4" not in result[1]  # heading-anchored: no redundant overlap
 
 
 def test_chunk_markdown_overlap():
-    """With stride=3, the last block of chunk N == first block of chunk N+1."""
+    """Heading-anchored: each chunk begins at the governing section heading."""
     blocks = parse_md_blocks(_load("mixed_doc.md"))
     chunks = chunk_markdown(_load("mixed_doc.md"))
-    # mixed_doc has 10 blocks → 3 chunks: [0:4], [3:7], [6:10]
+    # mixed_doc: 10 blocks → 3 heading-anchored chunks
     assert len(chunks) == 3
-    # Block at index 3 (overlap between chunk 0 and chunk 1)
-    assert blocks[3] in chunks[0]
-    assert blocks[3] in chunks[1]
-    # Block at index 6 (overlap between chunk 1 and chunk 2)
+    # chunk[0]: [# Introduction, para, ## Section 1, list]
+    # Rule 2(a): ### Subsection 1.1 is next → chunk[1] starts there
+    assert chunks[0].strip().startswith("# Introduction")
+    assert chunks[1].strip().startswith("### Subsection 1.1")
+    # chunk[2]: Rule 2(b) backward search finds ## Section 2 in chunk[1]
+    assert chunks[2].strip().startswith("## Section 2")
+    # ## Section 2 (blocks[6]) appears in both chunk[1] and chunk[2]
     assert blocks[6] in chunks[1]
     assert blocks[6] in chunks[2]
 
@@ -333,13 +336,65 @@ def test_chunk_markdown_all_blocks_covered():
 
 
 def test_chunk_markdown_custom_window():
-    text = "\n\n".join(f"# H{i}" for i in range(9))  # 9 blocks
-    # blocks_per_chunk=3, overlap=1 → stride=2
+    # 9 paragraph blocks (no headings) → mechanical overlap applies (stride = blocks_per_chunk - overlap = 2)
     # starts: 0, 2, 4, 6 → 4 chunks ([0:3],[2:5],[4:7],[6:9])
+    text = "\n\n".join(f"Paragraph {i} with some content." for i in range(9))
     result = chunk_markdown(text, blocks_per_chunk=3, overlap=1)
     assert len(result) == 4
     for chunk in result:
         assert chunk.strip()
+
+
+# ── chunk_markdown: heading-aware rules ─────────────────────────
+
+
+def test_no_orphan_heading_at_chunk_end():
+    """Rule 1: heading at window boundary is extended to include the next body block."""
+    # blocks: [# H1, P1, P2, ## H2, P3, P4, P5, P6]  (8 blocks)
+    # Without Rule 1: chunk[0] = [# H1, P1, P2, ## H2] → ## H2 orphaned at end
+    # With Rule 1:    chunk[0] = [# H1, P1, P2, ## H2, P3] → heading followed by body
+    md = "\n\n".join([
+        "# H1", "paragraph one", "paragraph two",
+        "## H2", "paragraph three",
+        "paragraph four", "paragraph five", "paragraph six",
+    ])
+    chunks = chunk_markdown(md, blocks_per_chunk=4, overlap=1)
+    # chunk[0] must NOT end with a bare heading
+    assert not chunks[0].strip().endswith("## H2")
+    # ## H2 must be inside chunk[0] together with its following body
+    assert "## H2" in chunks[0]
+    assert "paragraph three" in chunks[0]
+
+
+def test_heading_anchored_next_chunk_rule2a():
+    """Rule 2(a): when the block after chunk end is a heading, next chunk starts there."""
+    # blocks: [# H1, P1, P2, P3, ## H2, P4, P5, P6]
+    # chunk[0] ends at P3 (index 3); blocks[4]=## H2 is heading → start=4 directly
+    md = "\n\n".join([
+        "# H1", "para1", "para2", "para3",
+        "## H2", "para4", "para5", "para6",
+    ])
+    chunks = chunk_markdown(md, blocks_per_chunk=4, overlap=1)
+    assert chunks[1].strip().startswith("## H2"), (
+        f"Expected chunk[1] to start with '## H2', got: {chunks[1][:50]!r}"
+    )
+
+
+def test_heading_anchored_backward_search_rule2b():
+    """Rule 2(b): backward search finds the nearest heading in the overlap zone."""
+    # blocks: [# H1, P1, P2, ## H2, P3, P4, P5, P6, P7, P8]  (10 blocks)
+    # Rule 1 extends chunk[0] to [# H1, P1, P2, ## H2, P3].
+    # blocks[5]=P4 is not heading → Rule 2(b): backward search finds ## H2 at index 3
+    # → chunk[1] starts at ## H2.
+    md = "\n\n".join([
+        "# H1", "para1", "para2",
+        "## H2", "para3",
+        "para4", "para5", "para6", "para7", "para8",
+    ])
+    chunks = chunk_markdown(md, blocks_per_chunk=4, overlap=1)
+    assert chunks[1].strip().startswith("## H2"), (
+        f"Expected chunk[1] to start with '## H2', got: {chunks[1][:50]!r}"
+    )
 
 
 # ── chunk_markdown: non-.md path not affected ───────────────────

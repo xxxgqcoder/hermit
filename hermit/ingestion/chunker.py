@@ -264,6 +264,18 @@ def parse_md_blocks(text: str) -> list[str]:
     return blocks
 
 
+def _is_heading(block: str) -> bool:
+    """Return True if *block* is an ATX or setext heading."""
+    lines = block.strip().splitlines()
+    if not lines:
+        return False
+    if _ATX_RE.match(lines[0]):
+        return True
+    if len(lines) == 2 and _SETEXT_RE.match(lines[1]):
+        return True
+    return False
+
+
 def chunk_markdown(
     text: str,
     blocks_per_chunk: int = 4,
@@ -272,7 +284,20 @@ def chunk_markdown(
     """Chunk Markdown by grouping consecutive semantic blocks.
 
     Splits *text* into semantic blocks via :func:`parse_md_blocks`, then
-    produces overlapping chunks using a sliding window.
+    produces overlapping chunks using a heading-aware sliding window.
+
+    Two heading-aware rules apply:
+
+    * **Rule 1 – no orphan heading**: if the last block of a chunk is a
+      heading *and* the next block is not also a heading, extend the chunk
+      by one block so the heading is never left without its body.
+    * **Rule 2 – heading-anchored overlap**:
+
+      - (a) If the block immediately after the current chunk is a heading,
+        the next chunk starts exactly there (no duplication needed).
+      - (b) Otherwise search backward from the mechanical overlap position
+        for the nearest heading; if found, start the next chunk there so
+        every chunk begins with its governing section heading.
 
     Args:
         text: Raw Markdown text.
@@ -289,13 +314,40 @@ def chunk_markdown(
     if len(blocks) <= blocks_per_chunk:
         return ['\n\n'.join(blocks)]
 
-    stride = blocks_per_chunk - overlap
     chunks: list[str] = []
     start = 0
+
     while start < len(blocks):
-        chunk_blocks = blocks[start:start + blocks_per_chunk]
-        chunks.append('\n\n'.join(chunk_blocks))
-        if start + blocks_per_chunk >= len(blocks):
+        end = min(start + blocks_per_chunk, len(blocks))
+
+        # Rule 1: Never orphan a heading at the end of a chunk.
+        # Extend by 1 only when the heading is followed by a non-heading block
+        # (avoids runaway extension in all-heading documents).
+        if (
+            end < len(blocks)
+            and _is_heading(blocks[end - 1])
+            and not _is_heading(blocks[end])
+        ):
+            end += 1
+
+        chunks.append('\n\n'.join(blocks[start:end]))
+
+        if end >= len(blocks):
             break
-        start += stride
+
+        # Rule 2: Heading-anchored start for the next chunk.
+        if _is_heading(blocks[end]):
+            # (a) The very next block is a heading — start there directly.
+            start = end
+        else:
+            # (b) Mechanical overlap, then search backward for nearest heading.
+            mechanical_start = end - overlap
+            next_start = mechanical_start
+            for k in range(mechanical_start, start, -1):
+                if _is_heading(blocks[k]):
+                    next_start = k
+                    break
+            # Guarantee progress: never stall at the same position.
+            start = max(next_start, start + 1)
+
     return chunks
