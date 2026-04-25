@@ -9,6 +9,8 @@ It is designed for local-first workflows and works well as a lightweight retriev
 ## Highlights
 
 - **Runs fully locally**: models, vector data, and metadata live inside the project
+- **Semantic Markdown chunking**: a state-machine parser splits `.md` files into 11 semantically coherent block types (headings, fenced code, math, tables, blockquotes, lists, …) before chunking — code blocks and tables are never split mid-content
+- **Heading-aware sliding window**: chunks always start at a section heading when possible, so each retrieved chunk is self-contained and retrieval-friendly even without surrounding context
 - **Dual Vector Storage Modes**: Automatically handles both local (embedded) and standalone (Docker-based) Qdrant backends.
 - **Multi-threaded Search Acceleration**: Bypasses GIL with ONNX-based reranking using a dedicated thread pool, achieving ~3x throughput improvement.
 - **Multi-collection support**: one folder maps to one collection
@@ -45,10 +47,41 @@ Each registered folder goes through:
 
 1. startup scan
 2. SQLite metadata diffing
-3. text chunking
+3. text chunking (see below)
 4. embedding generation
 5. Qdrant upsert
 6. ongoing periodic polling
+
+### Markdown semantic chunking
+
+For `.md` files, Hermit uses a two-phase strategy instead of a simple token sliding window:
+
+**Phase 1 — block parsing (`parse_md_blocks`)**: A state-machine parser scans the file line-by-line and groups content into 11 semantically coherent block types:
+
+| Block type | Examples |
+|---|---|
+| YAML frontmatter | `---` … `---` at file start |
+| Fenced code block | ` ``` ` … ` ``` ` or `~~~` … `~~~` |
+| Math block | `$$` … `$$` |
+| ATX heading | `# H1` … `###### H6` |
+| Setext heading | underline with `===` or `---` |
+| Table | pipe-delimited rows |
+| Blockquote | `>` prefixed lines |
+| Horizontal rule | `---` / `***` / `___` |
+| List | entire list including nested items |
+| Standalone image | `![alt](url)` or Obsidian `![[path]]` |
+| Paragraph | any other contiguous non-blank text |
+
+This ensures fenced code blocks, math formulas, and tables are always kept intact as a unit.
+
+**Phase 2 — heading-aware sliding window (`chunk_markdown`)**: Blocks are grouped into chunks (default: 4 blocks per chunk) with two structural rules:
+
+- **Rule 1 — no orphan headings**: if the last block in a chunk is a heading, the chunk is automatically extended by one block so the heading always enters a chunk together with at least its first body block.
+- **Rule 2 — heading-anchored start**: the next chunk begins at the nearest preceding heading rather than at an arbitrary paragraph, so every chunk carries its own section context.
+
+Other file types continue to use the token-based sliding window (`chunk_text`).
+
+See [docs/markdown-chunking.md](docs/markdown-chunking.md) for the full design.
 
 ### Default settings
 
