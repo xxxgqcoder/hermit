@@ -199,6 +199,10 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+# Temporary parse review files
+parse_blocks.txt
+parse_chunks.txt
+
 # PyPI configuration file
 .pypirc
 
