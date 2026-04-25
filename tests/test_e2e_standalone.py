@@ -358,8 +358,12 @@ def test_standalone_indexing_and_search(standalone_env, test_docs_dir):
         (hermit_home / "hermit.pid").unlink(missing_ok=True)
 
 
-def test_standalone_container_removed_after_stop(standalone_env, tmp_path):
-    """Docker container is removed after `hermit stop` (atexit cleanup)."""
+def test_standalone_container_stopped_after_stop(standalone_env, tmp_path):
+    """Docker container is stopped (not removed) after `hermit stop`.
+
+    Persistent-container design: atexit calls `docker stop`, preserving
+    the container so subsequent `hermit start` can resume with `docker start`.
+    """
     hermit_home = tmp_path / "hermit_stop_test"
     hermit_home.mkdir()
 
@@ -393,27 +397,38 @@ def test_standalone_container_removed_after_stop(standalone_env, tmp_path):
         port = _read_port_file(hermit_home, timeout=10)
         assert _poll_health(port, timeout=300), "Server did not become ready"
 
-        # Stop server — should trigger atexit Docker cleanup
+        # Stop server — atexit should docker stop (not rm) the container
         subprocess.run(
             [sys.executable, "-m", "hermit.cli", "stop"],
             env=env, check=False, capture_output=True,
         )
 
-        # Poll for container removal (up to 15s for atexit handler)
+        # Poll for container to stop running (up to 15s for atexit handler)
+        # docker ps (no -a) only shows RUNNING containers
         deadline = time.monotonic() + 15
-        container_removed = False
+        container_stopped = False
         while time.monotonic() < deadline:
-            result = subprocess.run(
+            running = subprocess.run(
                 ["docker", "ps", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
                 capture_output=True, text=True,
             )
-            if container_name not in result.stdout:
-                container_removed = True
+            if container_name not in running.stdout:
+                container_stopped = True
                 break
             time.sleep(1)
 
-        assert container_removed, (
-            f"Docker container '{container_name}' was not removed after hermit stop"
+        assert container_stopped, (
+            f"Docker container '{container_name}' is still running after hermit stop"
+        )
+
+        # Container should still EXIST (just stopped) — persistent design
+        all_containers = subprocess.run(
+            ["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
+            capture_output=True, text=True,
+        )
+        assert container_name in all_containers.stdout, (
+            f"Container '{container_name}' should still exist (stopped) after hermit stop, "
+            "but was removed — persistent-container invariant violated"
         )
     finally:
         _remove_container(container_name)
@@ -422,3 +437,131 @@ def test_standalone_container_removed_after_stop(standalone_env, tmp_path):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+
+def test_standalone_orphan_container_adopted(standalone_env, tmp_path):
+    """Orphaned container (from crash) is adopted on next hermit start.
+
+    Simulates: hermit start → SIGKILL (container left running) →
+               hermit start → container adopted via fast-path healthy check →
+               hermit stop → container stopped (not removed).
+    """
+    hermit_home = tmp_path / "hermit_orphan_test"
+    hermit_home.mkdir()
+
+    models_src = PROJECT_ROOT / "models"
+    if models_src.exists():
+        (hermit_home / "models").symlink_to(models_src)
+
+    qdrant_port = _free_port()
+    qdrant_grpc_port = _free_port()
+    container_name = f"hermit_qdrant_test_{uuid.uuid4().hex[:8]}"
+
+    env = os.environ.copy()
+    env.update({
+        "HERMIT_HOME": str(hermit_home),
+        "HERMIT_START_TIMEOUT": "300",
+        "QDRANT_HOST": "127.0.0.1",
+        "QDRANT_MANAGED": "true",
+        "QDRANT_PORT": str(qdrant_port),
+        "QDRANT_GRPC_PORT": str(qdrant_grpc_port),
+        "QDRANT_CONTAINER_NAME": container_name,
+    })
+
+    # ── First start: create container ───────────────────────────
+    proc1 = subprocess.Popen(
+        [sys.executable, "-m", "hermit.cli", "start"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        port1 = _read_port_file(hermit_home, timeout=10)
+        assert _poll_health(port1, timeout=300), "First server did not become ready"
+
+        # Simulate crash: SIGKILL the uvicorn server process (not hermit CLI)
+        # The CLI already exited; we kill the server process via hermit stop --signal SIGKILL
+        # Simpler: just SIGKILL proc1 if it's the server (but proc1 is the 'hermit start' CLI
+        # which already exited). We need to kill the actual server by PID file.
+        pid_file = hermit_home / "hermit.pid"
+        server_pid = int(pid_file.read_text().strip()) if pid_file.exists() else None
+        if server_pid:
+            import signal as _signal
+            try:
+                os.kill(server_pid, _signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # Wait briefly for process to die
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(server_pid, 0)
+                    time.sleep(0.2)
+                except ProcessLookupError:
+                    break
+    finally:
+        try:
+            proc1.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc1.kill()
+            proc1.wait()
+
+    # Container should still be RUNNING after crash (orphaned)
+    running = subprocess.run(
+        ["docker", "ps", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    )
+    assert container_name in running.stdout, (
+        f"Container '{container_name}' should still be running after hermit crash"
+    )
+
+    # ── Second start: adopt orphaned container ───────────────────
+    # Remove stale pid file so hermit start doesn't refuse
+    (hermit_home / "hermit.pid").unlink(missing_ok=True)
+
+    proc2 = subprocess.Popen(
+        [sys.executable, "-m", "hermit.cli", "start"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        port2 = _read_port_file(hermit_home, timeout=10)
+        assert _poll_health(port2, timeout=300), "Second server (post-crash) did not become ready"
+
+        health = _get(port2, "/health")
+        assert health["status"] == "ready"
+        assert health["qdrant_mode"] == "standalone"
+
+        # Stop cleanly — container should be stopped, not removed
+        subprocess.run(
+            [sys.executable, "-m", "hermit.cli", "stop"],
+            env=env, check=False, capture_output=True,
+        )
+
+        # Wait for container to stop
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            r = subprocess.run(
+                ["docker", "ps", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
+                capture_output=True, text=True,
+            )
+            if container_name not in r.stdout:
+                break
+            time.sleep(1)
+
+        # Container exists (stopped) but is not running
+        all_containers = subprocess.run(
+            ["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
+            capture_output=True, text=True,
+        )
+        assert container_name in all_containers.stdout, (
+            "Container should still exist (stopped) after clean hermit stop"
+        )
+    finally:
+        _remove_container(container_name)
+        try:
+            proc2.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc2.kill()
+            proc2.wait()
