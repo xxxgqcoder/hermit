@@ -29,6 +29,21 @@ class SearchResponse(BaseModel):
     results: list[SearchResult]
 
 
+class CollectionCreateRequest(BaseModel):
+    name: str
+    folder_path: str
+    ignore_patterns: list[str] = []
+    ignore_extensions: list[str] = []
+
+
+class CollectionCreateResponse(BaseModel):
+    status: str
+    name: str
+    folder_path: str
+    ignore_patterns: list[str] = []
+    ignore_extensions: list[str] = []
+
+
 class CollectionStatus(BaseModel):
     name: str
     folder_path: str
@@ -43,6 +58,11 @@ class CollectionTaskStatus(BaseModel):
     queued_tasks: int
     in_progress_tasks: int
     worker_alive: bool
+
+
+class CollectionRemoveResponse(BaseModel):
+    status: str
+    name: str
 
 
 class SyncResponse(BaseModel):

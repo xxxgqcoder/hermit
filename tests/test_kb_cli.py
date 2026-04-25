@@ -197,6 +197,7 @@ def cli_env(tmp_path, monkeypatch):
     """Patch DATA_ROOT so CLI commands use a temp directory."""
     monkeypatch.setattr("hermit.storage.registry.DATA_ROOT", tmp_path)
     monkeypatch.setattr("hermit.storage.registry._REGISTRY_PATH", tmp_path / "collections.json")
+    monkeypatch.setattr("hermit.cli._read_pid", lambda: None)
     return tmp_path
 
 
@@ -240,6 +241,60 @@ def test_kb_add_and_list(cli_env, tmp_path, capsys):
     data = json.loads(captured.out)
     assert "my_docs" in data["collections"]
     assert data["collections"]["my_docs"]["folder_path"] == str(test_dir)
+
+
+def test_kb_add_uses_api_when_server_running(cli_env, tmp_path, capsys, monkeypatch):
+    """kb add should delegate to the daemon when Hermit is already running."""
+    from hermit.cli import main
+
+    test_dir = tmp_path / "api_docs"
+    test_dir.mkdir()
+
+    monkeypatch.setattr("hermit.cli._read_pid", lambda: 12345)
+    monkeypatch.setattr(
+        "hermit.cli._api_request_noexit",
+        lambda method, path, body=None: (
+            {
+                "status": "added",
+                "name": body["name"],
+                "folder_path": body["folder_path"],
+                "ignore_patterns": body["ignore_patterns"],
+                "ignore_extensions": [e.lower() for e in body["ignore_extensions"]],
+                "method": method,
+                "path": path,
+            },
+            None,
+            200,
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        with patch(
+            "sys.argv",
+            [
+                "hermit",
+                "kb",
+                "add",
+                "api_docs",
+                str(test_dir),
+                "--ignore",
+                "attachments/**",
+                "--ignore-ext",
+                ".PDF",
+            ],
+        ):
+            main()
+    assert exc_info.value.code == 0
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert data["status"] == "added"
+    assert data["name"] == "api_docs"
+    assert data["folder_path"] == str(test_dir)
+    assert data["ignore_patterns"] == ["attachments/**"]
+    assert data["ignore_extensions"] == [".pdf"]
+    assert data["method"] == "POST"
+    assert data["path"] == "/collections"
 
 
 def test_kb_add_invalid_name(cli_env, tmp_path, capsys):
@@ -338,15 +393,16 @@ def test_kb_add_exceeds_max(cli_env, tmp_path, capsys):
 
 
 def test_kb_remove(cli_env, tmp_path, capsys, monkeypatch):
-    """kb remove should unregister and destroy metadata."""
+    """kb remove should unregister, delete vectors, and destroy metadata."""
     from hermit.cli import main
     from hermit.storage.registry import get_all
 
     test_dir = tmp_path / "docs"
     test_dir.mkdir()
 
-    # Patch MetadataStore.destroy so it doesn't need a real SQLite DB
+    # Patch cleanup helpers so the test doesn't need a real SQLite DB or Qdrant.
     mock_destroyed = []
+    mock_deleted_collections = []
 
     class FakeMetadataStore:
         def __init__(self, name):
@@ -356,6 +412,11 @@ def test_kb_remove(cli_env, tmp_path, capsys, monkeypatch):
             mock_destroyed.append(self.name)
 
     monkeypatch.setattr("hermit.storage.metadata.MetadataStore", FakeMetadataStore)
+    monkeypatch.setattr(
+        "hermit.storage.qdrant.delete_collection",
+        lambda name: mock_deleted_collections.append(name),
+    )
+    monkeypatch.setattr("hermit.cli._read_pid", lambda: None)
 
     with pytest.raises(SystemExit) as exc_info:
         with patch("sys.argv", ["hermit", "kb", "add", "docs", str(test_dir)]):
@@ -374,6 +435,92 @@ def test_kb_remove(cli_env, tmp_path, capsys, monkeypatch):
     assert data["name"] == "docs"
     assert get_all() == {}
     assert "docs" in mock_destroyed
+    assert "docs" in mock_deleted_collections
+
+
+def test_kb_remove_uses_api_when_server_running(cli_env, capsys, monkeypatch):
+    """kb remove should delegate to the server when the daemon is running."""
+    from hermit.cli import main
+
+    monkeypatch.setattr("hermit.cli._read_pid", lambda: 12345)
+    monkeypatch.setattr(
+        "hermit.cli._api_request_noexit",
+        lambda method, path, body=None: (
+            {
+                "status": "removed",
+                "name": "docs",
+                "method": method,
+                "path": path,
+            },
+            None,
+            200,
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("sys.argv", ["hermit", "kb", "remove", "docs"]):
+            main()
+    assert exc_info.value.code == 0
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert data["status"] == "removed"
+    assert data["name"] == "docs"
+    assert data["method"] == "DELETE"
+    assert data["path"] == "/collections/docs"
+
+
+def test_kb_remove_falls_back_to_local_when_api_collection_missing(
+    cli_env, tmp_path, capsys, monkeypatch
+):
+    """kb remove should fall back to local cleanup if daemon 404s but registry still has it."""
+    from hermit.cli import main
+    from hermit.storage.registry import get_all
+
+    test_dir = tmp_path / "docs"
+    test_dir.mkdir()
+
+    mock_destroyed = []
+    mock_deleted_collections = []
+
+    class FakeMetadataStore:
+        def __init__(self, name):
+            self.name = name
+
+        def destroy(self):
+            mock_destroyed.append(self.name)
+
+    monkeypatch.setattr("hermit.storage.metadata.MetadataStore", FakeMetadataStore)
+    monkeypatch.setattr(
+        "hermit.storage.qdrant.delete_collection",
+        lambda name: mock_deleted_collections.append(name),
+    )
+    monkeypatch.setattr("hermit.cli._read_pid", lambda: None)
+    monkeypatch.setattr(
+        "hermit.cli._api_request_noexit",
+        lambda method, path, body=None: (None, "Collection not found", 404),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("sys.argv", ["hermit", "kb", "add", "docs", str(test_dir)]):
+            main()
+    assert exc_info.value.code == 0
+    assert "docs" in get_all()
+
+    monkeypatch.setattr("hermit.cli._read_pid", lambda: 12345)
+
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("sys.argv", ["hermit", "kb", "remove", "docs"]):
+            main()
+    assert exc_info.value.code == 0
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip().split("\n")[-1])
+    assert data["status"] == "removed"
+    assert data["name"] == "docs"
+    assert get_all() == {}
+    assert "docs" in mock_destroyed
+    assert "docs" in mock_deleted_collections
 
 
 def test_kb_remove_nonexistent(cli_env, capsys):

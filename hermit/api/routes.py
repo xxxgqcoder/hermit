@@ -3,7 +3,10 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from hermit.api.schemas import (
+    CollectionCreateRequest,
+    CollectionCreateResponse,
     CollectionStatus,
+    CollectionRemoveResponse,
     CollectionTaskStatus,
     HealthCollectionInfo,
     HealthResponse,
@@ -13,9 +16,16 @@ from hermit.api.schemas import (
     SyncResponse,
 )
 from hermit.ingestion.scanner import scan_folder
-from hermit.ingestion.task_queue import get_collection_task_status
+from hermit.ingestion.task_queue import (
+    cancel_collection_tasks,
+    get_collection_task_status,
+    wait_for_collection_tasks_idle,
+)
+from hermit.ingestion.watcher import start_watching, stop_watching
 from hermit.retrieval.searcher import search
+from hermit.storage import qdrant
 from hermit.storage.metadata import MetadataStore
+from hermit.storage.registry import register, unregister
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +68,60 @@ def sync_collection(name: str):
         ignore_extensions=cfg.get("ignore_extensions", []),
     )
     return SyncResponse(**stats)
+
+
+@router.post("/collections", response_model=CollectionCreateResponse)
+def add_collection(req: CollectionCreateRequest):
+    if req.name in _collections:
+        raise HTTPException(status_code=409, detail=f"Collection '{req.name}' already exists")
+
+    try:
+        register(
+            req.name,
+            req.folder_path,
+            ignore_patterns=req.ignore_patterns,
+            ignore_extensions=req.ignore_extensions,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    cfg = {
+        "folder_path": req.folder_path,
+        "ignore_patterns": list(req.ignore_patterns),
+        "ignore_extensions": [e.lower() for e in req.ignore_extensions],
+    }
+
+    try:
+        _collections[req.name] = cfg
+        stats = scan_folder(
+            req.name,
+            req.folder_path,
+            defer_indexing=True,
+            ignore_patterns=cfg["ignore_patterns"],
+            ignore_extensions=cfg["ignore_extensions"],
+        )
+        start_watching(
+            req.name,
+            req.folder_path,
+            ignore_patterns=cfg["ignore_patterns"],
+            ignore_extensions=cfg["ignore_extensions"],
+        )
+        logger.info("Initial scan for '%s': %s", req.name, stats)
+    except Exception as e:
+        _collections.pop(req.name, None)
+        stop_watching(req.name)
+        MetadataStore(req.name).destroy()
+        qdrant.delete_collection(req.name)
+        unregister(req.name)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return CollectionCreateResponse(
+        status="added",
+        name=req.name,
+        folder_path=req.folder_path,
+        ignore_patterns=cfg["ignore_patterns"],
+        ignore_extensions=cfg["ignore_extensions"],
+    )
 
 
 @router.get("/collections/{name}/status", response_model=CollectionStatus)
@@ -110,3 +174,48 @@ def collection_tasks_status(name: str):
     if name not in _collections:
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
     return CollectionTaskStatus(**get_collection_task_status(name))
+
+
+@router.delete("/collections/{name}", response_model=CollectionRemoveResponse)
+def remove_collection(name: str):
+    cfg = _collections.get(name)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+
+    stop_watching(name)
+    _collections.pop(name, None)
+
+    try:
+        cancel_collection_tasks(name)
+        if not wait_for_collection_tasks_idle(name, timeout=30.0):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Collection '{name}' still has indexing tasks in progress; "
+                    "please retry shortly"
+                ),
+            )
+
+        qdrant.delete_collection(name)
+        MetadataStore(name).destroy()
+        unregister(name)
+    except HTTPException:
+        _collections[name] = cfg
+        start_watching(
+            name,
+            cfg["folder_path"],
+            ignore_patterns=cfg.get("ignore_patterns", []),
+            ignore_extensions=cfg.get("ignore_extensions", []),
+        )
+        raise
+    except Exception as e:
+        _collections[name] = cfg
+        start_watching(
+            name,
+            cfg["folder_path"],
+            ignore_patterns=cfg.get("ignore_patterns", []),
+            ignore_extensions=cfg.get("ignore_extensions", []),
+        )
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return CollectionRemoveResponse(status="removed", name=name)

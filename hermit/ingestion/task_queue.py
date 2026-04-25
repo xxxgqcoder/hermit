@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
@@ -90,6 +91,55 @@ class _IndexTaskQueue:
             "worker_alive": len(alive) > 0,
         }
 
+    def cancel_collection(self, collection_name: str) -> dict:
+        """Remove queued tasks for a collection and report remaining in-progress work."""
+        with self._lock:
+            queued_removed = 0
+            with self._queue.mutex:
+                kept = []
+                for task in list(self._queue.queue):
+                    if task.collection_name == collection_name:
+                        queued_removed += 1
+                    else:
+                        kept.append(task)
+                self._queue.queue.clear()
+                self._queue.queue.extend(kept)
+                if queued_removed:
+                    self._queue.unfinished_tasks = max(
+                        0,
+                        self._queue.unfinished_tasks - queued_removed,
+                    )
+                    self._queue.not_full.notify_all()
+
+            self._pending = {
+                key for key in self._pending if key[0] != collection_name
+            }
+            in_progress_count = sum(
+                1 for key in self._in_progress if key[0] == collection_name
+            )
+
+        return {
+            "collection": collection_name,
+            "queued_removed": queued_removed,
+            "in_progress_tasks": in_progress_count,
+        }
+
+    def wait_until_collection_idle(
+        self,
+        collection_name: str,
+        timeout: float = 30.0,
+        poll_interval: float = 0.05,
+    ) -> bool:
+        """Wait until a collection has no in-progress index tasks."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                busy = any(key[0] == collection_name for key in self._in_progress)
+            if not busy:
+                return True
+            time.sleep(poll_interval)
+        return False
+
     def _handle_task(self, task: IndexTask):
         from hermit.ingestion.scanner import _index_file
 
@@ -144,3 +194,19 @@ def enqueue_index_task(
 
 def get_collection_task_status(collection_name: str) -> dict:
     return _QUEUE.get_status(collection_name)
+
+
+def cancel_collection_tasks(collection_name: str) -> dict:
+    return _QUEUE.cancel_collection(collection_name)
+
+
+def wait_for_collection_tasks_idle(
+    collection_name: str,
+    timeout: float = 30.0,
+    poll_interval: float = 0.05,
+) -> bool:
+    return _QUEUE.wait_until_collection_idle(
+        collection_name,
+        timeout=timeout,
+        poll_interval=poll_interval,
+    )
