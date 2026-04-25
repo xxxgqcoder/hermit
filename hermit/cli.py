@@ -119,6 +119,31 @@ def _api_request(method: str, path: str, body: dict | None = None) -> dict:
     return {}  # unreachable
 
 
+def _api_request_noexit(
+    method: str,
+    path: str,
+    body: dict | None = None,
+) -> tuple[dict | None, str | None, int | None]:
+    """Send HTTP request and return (result, error_message, status_code)."""
+    url = f"http://127.0.0.1:{load_port()}{path}"
+    data = json.dumps(body).encode() if body else None
+    headers = {"Content-Type": "application/json"} if body else {}
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read()), None, resp.status
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read()).get("detail", str(e))
+        except Exception:
+            detail = str(e)
+        return None, detail, e.code
+    except urllib.error.URLError:
+        return None, "server is not running (connection refused)", None
+    except TimeoutError:
+        return None, "server request timed out", None
+
+
 # ── Internal helpers ────────────────────────────────────────────
 
 
@@ -318,6 +343,32 @@ def cmd_kb_add(args):
     if not folder.is_dir():
         _error(f"'{folder}' is not a directory")
 
+    result = {
+        "status": "added",
+        "name": args.name,
+        "folder_path": str(folder),
+    }
+    if args.ignore:
+        result["ignore_patterns"] = args.ignore
+    if args.ignore_ext:
+        result["ignore_extensions"] = [e.lower() for e in args.ignore_ext]
+
+    pid = _read_pid()
+    if pid is not None:
+        api_result, error, _status = _api_request_noexit(
+            "POST",
+            "/collections",
+            {
+                "name": args.name,
+                "folder_path": str(folder),
+                "ignore_patterns": args.ignore or [],
+                "ignore_extensions": args.ignore_ext or [],
+            },
+        )
+        if api_result is None:
+            _error(error or "failed to add collection")
+        _output(api_result)
+
     try:
         register(
             args.name,
@@ -327,26 +378,39 @@ def cmd_kb_add(args):
         )
     except ValueError as e:
         _error(str(e))
-
-    result = {"status": "added", "name": args.name, "folder_path": str(folder)}
-    if args.ignore:
-        result["ignore_patterns"] = args.ignore
-    if args.ignore_ext:
-        result["ignore_extensions"] = args.ignore_ext
     _output(result)
 
 
-def cmd_kb_remove(args):
-    from hermit.storage.registry import get_all, unregister
+def _remove_collection_local(name: str) -> dict:
+    from hermit.storage import qdrant
     from hermit.storage.metadata import MetadataStore
+    from hermit.storage.registry import get_all, unregister
 
     existing = get_all()
-    if args.name not in existing:
-        _error(f"collection '{args.name}' not found")
+    if name not in existing:
+        _error(f"collection '{name}' not found")
 
-    unregister(args.name)
-    MetadataStore(args.name).destroy()
-    _output({"status": "removed", "name": args.name})
+    qdrant.delete_collection(name)
+    MetadataStore(name).destroy()
+    unregister(name)
+    return {"status": "removed", "name": name}
+
+
+def cmd_kb_remove(args):
+    pid = _read_pid()
+    if pid is not None:
+        result, error, status = _api_request_noexit("DELETE", f"/collections/{args.name}")
+        if result is None:
+            from hermit.storage.registry import get_all
+
+            existing = get_all()
+            if status == 404 and args.name in existing:
+                result = _remove_collection_local(args.name)
+            else:
+                _error(error or "failed to remove collection")
+    else:
+        result = _remove_collection_local(args.name)
+    _output(result)
 
 
 def cmd_kb_update(args):

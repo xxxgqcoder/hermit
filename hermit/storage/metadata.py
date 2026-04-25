@@ -50,10 +50,27 @@ class MetadataStore:
             self._local.conn = conn
         return conn
 
+    def _reset_conn(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
+
+    def _recover_missing_table(self) -> None:
+        self._reset_conn()
+        self._init_db()
+
     def get_all_records(self) -> dict[str, tuple[str, float]]:
         """Return {file_path: (file_hash, file_mtime)} for all indexed files."""
-        with self._conn() as conn:
-            rows = conn.execute("SELECT file_path, file_hash, file_mtime FROM files").fetchall()
+        try:
+            with self._conn() as conn:
+                rows = conn.execute("SELECT file_path, file_hash, file_mtime FROM files").fetchall()
+        except sqlite3.OperationalError as e:
+            if "no such table: files" not in str(e):
+                raise
+            self._recover_missing_table()
+            with self._conn() as conn:
+                rows = conn.execute("SELECT file_path, file_hash, file_mtime FROM files").fetchall()
         return {row[0]: (row[1], row[2]) for row in rows}
 
     def upsert(self, file_path: str, file_hash: str, file_mtime: float, chunk_count: int):
@@ -74,10 +91,19 @@ class MetadataStore:
             conn.execute("DELETE FROM files WHERE file_path = ?", (file_path,))
 
     def get_status(self) -> dict:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*), SUM(chunk_count) FROM files"
-            ).fetchone()
+        try:
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*), SUM(chunk_count) FROM files"
+                ).fetchone()
+        except sqlite3.OperationalError as e:
+            if "no such table: files" not in str(e):
+                raise
+            self._recover_missing_table()
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*), SUM(chunk_count) FROM files"
+                ).fetchone()
         return {
             "indexed_files": row[0] or 0,
             "total_chunks": row[1] or 0,
@@ -85,18 +111,24 @@ class MetadataStore:
 
     def get_chunk_count(self, file_path: str) -> int:
         """Return chunk_count for a file, or 0 if not found."""
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT chunk_count FROM files WHERE file_path = ?", (file_path,)
-            ).fetchone()
+        try:
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT chunk_count FROM files WHERE file_path = ?", (file_path,)
+                ).fetchone()
+        except sqlite3.OperationalError as e:
+            if "no such table: files" not in str(e):
+                raise
+            self._recover_missing_table()
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT chunk_count FROM files WHERE file_path = ?", (file_path,)
+                ).fetchone()
         return row[0] if row else 0
 
     def destroy(self):
         # Close thread-local connections
-        conn = getattr(self._local, "conn", None)
-        if conn:
-            conn.close()
-            self._local.conn = None
+        self._reset_conn()
         if self.db_path.exists():
             self.db_path.unlink()
         with self._cls_lock:
