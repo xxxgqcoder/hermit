@@ -198,6 +198,7 @@ def ensure_qdrant_running(
                 "-p", f"{port}:6333",
                 "-p", f"{grpc_port}:6334",
                 "-v", f"{qdrant_data_path}:/qdrant/storage:z",
+                "-e", "QDRANT__STORAGE__SNAPSHOTS_PATH=/qdrant/storage/snapshots",
                 image,
             ],
             check=True, capture_output=True, text=True,
