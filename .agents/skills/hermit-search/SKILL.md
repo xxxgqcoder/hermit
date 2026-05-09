@@ -238,5 +238,8 @@ hermit --pretty search my-notes "query"
 - **hybrid**：dense + sparse 各自召回 `rerank_candidates` 个候选 → Qdrant 服务端 RRF 融合 → cross-encoder 精排取 top-k
 - **semantic**：仅 dense 召回 → 精排
 - **keyword**：仅 sparse (BM25) 召回，默认跳过精排（追求速度）。需要时用 `--rerank` 显式启用
-- **fuzzy**：不走任何向量；从 Qdrant scroll 出候选（若指定 `--filename` 则先在数据库侧用 `MatchText` 过滤），再做 Python 端大小写不敏感的 `query in text` 子串匹配。结果按 `(source_file, chunk_index)` 排序后截 top-k。语义是真正的 LIKE 子串（不是 token 关键词），适合"我只记得里面有某个词"。Local 模式下是线性扫，对个人量级 collection 完全够用
+- **fuzzy**：不走任何向量；通过 Qdrant scroll 分页扫描候选 chunk，再做 Python 端大小写不敏感的 `query in text` 子串验证。语义是真正的 LIKE 子串（不是 token 关键词），适合"我只记得里面有某个词"。结果按 `(source_file, chunk_index)` 排序后截 top-k。
+  - **Stand-alone 模式**：`text` 字段的 TEXT payload 索引被用作粗筛（`MatchText(query)`），Qdrant 端先把候选量降到很小，再 Python 验证子串
+  - **Local（embedded）模式**：payload 索引是 no-op，全靠 scroll 分页 + Python 子串扫；个人量级（万级 chunk）完全够用，但十万级以上会偏慢——已知限制，未来若有需要再加本地倒排
+  - 任意模式都有安全上限 `_FUZZY_MAX_SCAN`（默认 100k chunks），到达后 Server 日志告警并停止扫描
 - **filename 过滤**：纯子串走 Qdrant `MatchText`（数据库侧过滤）；含 `*?[` 的 glob 走 Python `fnmatch` 后过滤，可同时匹配 basename 或完整路径

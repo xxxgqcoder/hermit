@@ -41,6 +41,17 @@ def _get_lock():
     return contextlib.nullcontext() if _standalone_mode else _lock
 
 
+def is_standalone_mode() -> bool:
+    """True after get_client() has been called against a stand-alone Qdrant server.
+
+    Used by callers (e.g. fuzzy search) to decide whether server-side payload
+    indexes can be relied on for pre-filtering.
+    """
+    # Force lazy init so callers can ask before the first query.
+    client()
+    return _standalone_mode
+
+
 def _check_no_qdrant_service() -> None:
     """Safeguard #1 — port probe.
 
