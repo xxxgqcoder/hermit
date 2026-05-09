@@ -90,7 +90,7 @@ Hermit 的搜索流程如下：
 - 搜索 `top_k`: `5`
 - 默认 `w_dense`: `0.7`
 - 默认 `w_sparse`: `0.3`
-- 默认 rerank candidates: `50`
+- 默认 rerank candidates: `20`
 - collection 数量上限: `4`
 - collection 名称最大长度: `64`
 - 默认端口: `8000`
@@ -115,11 +115,12 @@ Hermit 会根据环境变量自动切换存储模式：
 QDRANT_HOST=localhost hermit start
 ```
 
-## 性能与并行处理
+## 性能与内存
 
-Hermit 针对高并发搜索场景（例如作为多个 Agent 的后端）进行了优化：
-- **并行重排 (Parallel Reranking)**：利用 `SEARCH_THREADS`（计算规则：`min(4, CPU核心数 // 2)`）同时执行多个 Cross-Encoder 推理。
-- **突破 GIL 限制**：由于核心推理通过 ONNX Runtime 的 C++ 库处理，即使在单 Python 进程内也可实现真正的并行化。
+Hermit 针对本地搜索的稳定内存占用进行了优化：
+- **串行搜索请求**：搜索请求通过单 worker executor 串行执行，避免多个 reranker 请求同时占用共享 ONNX session。
+- **限制 ONNX 推理线程**：默认使用 `HERMIT_ONNX_THREADS=4`，在单请求延迟和 ONNX Runtime 保留 buffer 之间取平衡。
+- **缩小重排候选池**：默认每次查询使用 20 个候选，并保留 Cross-Encoder reranker 精排。
 
 ## 项目结构
 

@@ -20,6 +20,7 @@ import pytest
 
 # Project root: two levels up from tests/
 PROJECT_ROOT = Path(__file__).parent.parent
+DEFAULT_MODEL_ROOT = Path.home() / ".hermit" / "models"
 
 
 def _free_port() -> int:
@@ -47,6 +48,22 @@ def _poll_health(port: int, timeout: int = 60) -> bool:
     return False
 
 
+def _poll_health_while_process_alive(
+    port: int,
+    proc: subprocess.Popen,
+    timeout: int = 60,
+) -> bool:
+    """Poll health, but stop early if the startup wrapper exits unsuccessfully."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _poll_health(port, timeout=1):
+            return True
+        returncode = proc.poll()
+        if returncode is not None and returncode != 0:
+            return False
+    return False
+
+
 def _read_port_file(hermit_home: Path, timeout: int = 10) -> int:
     """Poll for port.json to appear and return the port."""
     port_file = hermit_home / "port.json"
@@ -60,6 +77,50 @@ def _read_port_file(hermit_home: Path, timeout: int = 10) -> int:
                 pass
         time.sleep(0.1)
     raise RuntimeError(f"port.json not found in {hermit_home} after {timeout}s")
+
+
+def _link_models(hermit_home: Path) -> None:
+    """Symlink an existing model cache into an isolated HERMIT_HOME."""
+    for models_src in (PROJECT_ROOT / "models", DEFAULT_MODEL_ROOT):
+        if models_src.exists():
+            (hermit_home / "models").symlink_to(models_src)
+            return
+
+
+def _terminate_hermit_server(hermit_home: Path, timeout: float = 5.0) -> None:
+    """Best-effort cleanup for daemonized uvicorn started by hermit cli."""
+    pid_file = hermit_home / "hermit.pid"
+    if not pid_file.exists():
+        return
+
+    try:
+        pid = int(pid_file.read_text().strip())
+    except ValueError:
+        pid_file.unlink(missing_ok=True)
+        return
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pid_file.unlink(missing_ok=True)
+        return
+    except OSError:
+        return
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pid_file.unlink(missing_ok=True)
+            return
+        time.sleep(0.1)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    pid_file.unlink(missing_ok=True)
 
 
 # ── fixtures ─────────────────────────────────────────────────────
@@ -79,10 +140,7 @@ def hermit_env(tmp_path):
     hermit_home = tmp_path / "hermit_home"
     hermit_home.mkdir()
 
-    # Symlink models so startup is fast
-    models_src = PROJECT_ROOT / "models"
-    if models_src.exists():
-        (hermit_home / "models").symlink_to(models_src)
+    _link_models(hermit_home)
 
     env = os.environ.copy()
     env["HERMIT_HOME"] = str(hermit_home)
@@ -125,12 +183,14 @@ def hermit_server(hermit_env):
     except RuntimeError:
         proc.kill()
         proc.wait()
+        _terminate_hermit_server(hermit_home)
         pytest.fail("Timed out waiting for port.json to appear")
 
     start_timeout = int(env.get("HERMIT_START_TIMEOUT", 120))
-    if not _poll_health(port, timeout=start_timeout):
+    if not _poll_health_while_process_alive(port, proc, timeout=start_timeout):
         proc.kill()
         proc.wait()
+        _terminate_hermit_server(hermit_home)
         # Dump logs for debugging
         log_file = hermit_home / "logs" / "hermit.log"
         if log_file.exists():
@@ -147,20 +207,7 @@ def hermit_server(hermit_env):
         capture_output=True,
     )
 
-    # Wait for PID file to disappear (up to 5s), then force-kill
-    pid_file = hermit_home / "hermit.pid"
-    for _ in range(10):
-        if not pid_file.exists():
-            break
-        time.sleep(0.5)
-    else:
-        if pid_file.exists():
-            try:
-                pid = int(pid_file.read_text().strip())
-                os.kill(pid, signal.SIGKILL)
-            except (ValueError, ProcessLookupError, OSError):
-                pass
-            pid_file.unlink(missing_ok=True)
+    _terminate_hermit_server(hermit_home)
 
     # Ensure the Popen process is reaped
     try:

@@ -48,9 +48,15 @@ QDRANT_HOST=localhost hermit start
 
 输出示例：`{"status": "started", "pid": 12345, "port": 8000}`
 
-### 2. 搜索性能优化
+### 2. 搜索内存策略
 
-Hermit 会根据 CPU 核心数自动配置 `SEARCH_THREADS` 并行搜索线程（默认为核心数的一半，最高不超过 4），以充分利用多核性能进行并发重排 (Reranking)。
+Hermit 的搜索请求在服务端串行执行，不提供 `SEARCH_THREADS` 并发请求配置。这样可以避免多个请求同时占用共享 ONNX session 和 Cross-Encoder reranker，降低本地常驻内存和峰值内存。
+
+单次 ONNX 推理的内部线程数可通过 `HERMIT_ONNX_THREADS` 调整，默认值为 `4`：
+
+```sh
+HERMIT_ONNX_THREADS=4 hermit start
+```
 
 ### 3. 添加知识库
 
@@ -116,7 +122,7 @@ hermit search <collection> "<query>"
 | `collection` | str | — | Collection 名称 |
 | `query` | str | — | 搜索查询 |
 | `--top-k` | int | 5 | 返回结果数 |
-| `--rerank-candidates` | int | 50 | 精排候选池大小 |
+| `--rerank-candidates` | int | 20 | 精排候选池大小 |
 
 示例：
 

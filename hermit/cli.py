@@ -207,9 +207,7 @@ def cmd_start(_args):
 
     for elapsed in range(start_timeout):
         time.sleep(1)
-        try:
-            os.kill(proc.pid, 0)
-        except ProcessLookupError:
+        if proc.poll() is not None:
             PID_FILE.unlink(missing_ok=True)
             _error(f"server process exited unexpectedly, check {log_file}")
 

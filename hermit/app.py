@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from hermit.api.routes import router
-from hermit.config import SEARCH_THREADS
 from hermit.ingestion.task_queue import start_task_worker
 from hermit.retrieval import embedder, reranker
 
@@ -20,6 +19,11 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Search requests are intentionally serialized.  The ONNX models are large
+# shared sessions with retained native buffers; concurrent request execution
+# raises memory pressure without enough benefit for Hermit's local use case.
+_SEARCH_WORKERS = 1
 
 # ── Server state ────────────────────────────────────────────────
 _server_start_time: float | None = None
@@ -46,10 +50,10 @@ async def lifespan(app: FastAPI):
     _server_start_time = time.time()
 
     _search_executor = ThreadPoolExecutor(
-        max_workers=SEARCH_THREADS,
+        max_workers=_SEARCH_WORKERS,
         thread_name_prefix="search",
     )
-    logger.info("Search thread pool: %d threads", SEARCH_THREADS)
+    logger.info("Search executor: serialized (%d worker)", _SEARCH_WORKERS)
 
     # Auto-download missing models before loading them
     from hermit.models import ensure_models, ensure_quantized_models

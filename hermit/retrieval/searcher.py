@@ -19,6 +19,7 @@ def search(
     """Hybrid search with reranking. Returns list of result dicts."""
     dense_vec = embedder.embed_query_dense(query)
     sparse_vec = embedder.embed_query_sparse(query)
+    candidate_limit = max(top_k, rerank_candidates)
 
     # Thread-safe query via qdrant module lock
     results = qdrant.query_points(
@@ -27,7 +28,7 @@ def search(
             models.Prefetch(
                 query=dense_vec,
                 using="dense",
-                limit=rerank_candidates,
+                limit=candidate_limit,
             ),
             models.Prefetch(
                 query=models.SparseVector(
@@ -35,11 +36,11 @@ def search(
                     values=sparse_vec.values.tolist(),
                 ),
                 using="sparse",
-                limit=rerank_candidates,
+                limit=candidate_limit,
             ),
         ],
         query=models.FusionQuery(fusion=models.Fusion.RRF),
-        limit=rerank_candidates,
+        limit=candidate_limit,
         with_payload=True,
     ).points
 
@@ -54,12 +55,15 @@ def search(
 
     output = []
     for idx in top_indices:
-        r = results[idx]
-        output.append({
-            "text": r.payload["text"],
-            "source_file": r.payload["source_file"],
-            "chunk_index": r.payload["chunk_index"],
-            "total_chunks": r.payload["total_chunks"],
-            "score": r.score,
-        })
+        output.append(_result_to_dict(results[idx]))
     return output
+
+
+def _result_to_dict(result) -> dict:
+    return {
+        "text": result.payload["text"],
+        "source_file": result.payload["source_file"],
+        "chunk_index": result.payload["chunk_index"],
+        "total_chunks": result.payload["total_chunks"],
+        "score": result.score,
+    }
