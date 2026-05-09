@@ -121,13 +121,12 @@ To force standalone mode, start Hermit with:
 QDRANT_HOST=localhost hermit start
 ```
 
-## Performance & Concurrency
+## Performance & Memory
 
-Hermit is optimized for high-concurrency search environments (e.g., as a backend for multiple agents):
-- **Parallel Reranking**: Utilizes `SEARCH_THREADS` (default: `2`) to perform multiple cross-encoder inferences simultaneously.
-- **GIL Bypass**: Since the core inference is handled by ONNX Runtime's C++ library, search requests are truly parallel even within a single Python process.
-- **Improved Throughput**: Validated throughput of ~1.0 queries per second (with 20 candidates per query) on Apple M4 Pro hardware.
-- **Memory-aware defaults**: Uses `SEARCH_THREADS=2` and `HERMIT_ONNX_THREADS=2` by default to keep shared ONNX session concurrency and retained per-thread buffers bounded.
+Hermit is optimized for stable local search memory usage:
+- **Serialized Search**: Search requests run through a single-worker executor. This keeps the shared ONNX sessions from serving multiple reranker requests concurrently.
+- **Bounded ONNX Inference**: Uses `HERMIT_ONNX_THREADS=2` by default to reduce retained per-thread buffers inside ONNX Runtime.
+- **Smaller Rerank Pool**: Uses 20 candidates per query by default while keeping cross-encoder reranking enabled.
 
 ## Project layout
 

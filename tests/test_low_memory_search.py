@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
-from hermit.config import DEFAULT_RERANK_CANDIDATES, ONNX_THREADS, SEARCH_THREADS
+import hermit.config as config
+from hermit.config import DEFAULT_RERANK_CANDIDATES, ONNX_THREADS
 from hermit.retrieval import searcher
 
 
@@ -33,8 +34,8 @@ def test_default_rerank_candidates_reduced_for_memory():
     assert DEFAULT_RERANK_CANDIDATES == 20
 
 
-def test_default_session_concurrency_reduced_for_memory():
-    assert SEARCH_THREADS <= 2
+def test_search_request_concurrency_is_not_configurable():
+    assert not hasattr(config, "SEARCH_THREADS")
     assert ONNX_THREADS == 2
 
 

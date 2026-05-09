@@ -29,11 +29,6 @@ DEFAULT_W_DENSE = 0.7
 DEFAULT_W_SPARSE = 0.3
 DEFAULT_RERANK_CANDIDATES = 20
 
-# Search thread pool — concurrent reranker calls (ONNX releases GIL → true parallel)
-# Default: up to 2 concurrent requests against the shared ONNX sessions.
-_cpu = os.cpu_count() or 4
-SEARCH_THREADS: int = int(os.environ.get("SEARCH_THREADS", min(2, _cpu // 2)))
-
 # ONNX Runtime thread control — intra/inter-op threads per ONNX session.
 # Default to 2 to reduce per-thread tensor buffers retained by ONNX Runtime.
 # Override with HERMIT_ONNX_THREADS env var.
