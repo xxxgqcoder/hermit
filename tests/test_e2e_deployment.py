@@ -17,19 +17,31 @@ run without it (``pytest.exit`` at module load). The pinned
 
 Test groups
 ───────────
-1. Smoke per mode             — clean boot, /health, isolation
-2. KB lifecycle per mode      — empty boot → add → index → search
-3. Persistence per mode       — restart preserves data
-4. Recovery per mode          — SIGKILL during indexing, KB folder
-                                 emptied before restart
-5. Mode-switching             — Local → Stand-alone reuses the same
-                                 ``~/.hermit/data/qdrant`` directory
-6. Stand-alone-only           — IPv6 startup, container persistence
-                                 (stopped not removed), orphan adoption,
-                                 atexit container stop, friendly errors
-                                 when Docker / image unavailable
-7. Image-pin invariants       — no Docker required; assert tag is fixed
-                                 and matches ``hermit.config.QDRANT_IMAGE``
+1.  Smoke per mode             — clean boot, /health, isolation
+2.  KB lifecycle per mode      — empty boot → add → index → search
+3.  Persistence per mode       — restart preserves data
+4.  Recovery per mode          — SIGKILL during indexing, KB folder
+                                  emptied before restart
+5.  Mode-switching             — Local → Stand-alone reuses the same
+                                  ``~/.hermit/data/qdrant`` directory
+6.  Stand-alone-only           — IPv6 startup, container persistence
+                                  (stopped not removed), orphan adoption,
+                                  atexit container stop, friendly errors
+                                  when Docker / image unavailable
+7.  Image-pin invariants       — no Docker required; assert tag is fixed
+                                  and matches ``hermit.config.QDRANT_IMAGE``
+8.  Embedding cache (#27)      — second add of the same KB is dramatically
+                                  faster and writes no new cache entries
+9.  KB lifecycle edge cases    — remove during indexing, incremental file
+                                  modification, multi-collection isolation,
+                                  search quality regression
+10. Graceful shutdown / concurrency — SIGTERM mid-indexing, search under
+                                       indexing load
+11. Reverse mode-switching     — Stand-alone → Local symmetry
+12. Stand-alone resilience     — `docker restart` of the Qdrant container
+                                  while Hermit is up
+13. Server lifecycle           — port-conflict fallback when port.json
+                                  points at an occupied port
 """
 
 import json
@@ -1075,3 +1087,601 @@ def _proc_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+
+
+def _du_bytes(path: Path) -> int:
+    """Recursively sum sizes of all files under *path*. Missing dir → 0."""
+    if not path.exists():
+        return 0
+    total = 0
+    for p in path.rglob("*"):
+        if p.is_file():
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+# ────────────────────────────────────────────────────────────────
+#                  8. Embedding cache (post-#27)
+# ────────────────────────────────────────────────────────────────
+
+
+def test_embedding_cache_speeds_up_reindex(tmp_path, large_docs_dir):
+    """Re-adding the same KB with a warm cache must skip ONNX inference.
+
+    Indexes ``large_docs_dir`` once cold (writes vectors into
+    ``HERMIT_HOME/cache/{dense,sparse}``), removes the collection, then
+    indexes the *same* directory again and asserts:
+      * second-round wall time is at most 1/3 of the first round
+      * cache directory size after round 2 is identical to round 1
+        (proving every chunk was a hit and nothing was re-written)
+
+    Local mode only — the cache lives under ``HERMIT_HOME`` and is
+    deployment-mode-independent, so running both modes would just
+    duplicate the same assertion.
+    """
+    hermit_home = tmp_path / "hermit_home_cache"
+    hermit_home.mkdir()
+    _link_models(hermit_home)
+    env, _ = _make_local_env(hermit_home)
+
+    proc, port = _start_server(env, hermit_home)
+    try:
+        # ── Round 1: cold cache ─────────────────────────────
+        rc, _ = _run_hermit(["kb", "add", "cache_col", str(large_docs_dir)], env=env)
+        assert rc == 0
+        _post(port, "/collections/cache_col/sync", {})
+        cold_start = time.monotonic()
+        assert _poll_indexing_done(port, "cache_col", timeout=120)
+        cold_elapsed = time.monotonic() - cold_start
+        cold_status = _get(port, "/collections/cache_col/status")
+        assert cold_status["total_chunks"] > 0
+
+        cache_root = hermit_home / "cache"
+        cold_cache_size = _du_bytes(cache_root)
+        assert cold_cache_size > 0, "Cache should have entries after cold round"
+
+        rc, _ = _run_hermit(["kb", "remove", "cache_col"], env=env)
+        assert rc == 0
+
+        # ── Round 2: warm cache ─────────────────────────────
+        rc, _ = _run_hermit(["kb", "add", "cache_col", str(large_docs_dir)], env=env)
+        assert rc == 0
+        _post(port, "/collections/cache_col/sync", {})
+        warm_start = time.monotonic()
+        assert _poll_indexing_done(port, "cache_col", timeout=120)
+        warm_elapsed = time.monotonic() - warm_start
+        warm_status = _get(port, "/collections/cache_col/status")
+
+        warm_cache_size = _du_bytes(cache_root)
+
+        assert warm_status["total_chunks"] == cold_status["total_chunks"]
+        assert warm_cache_size == cold_cache_size, (
+            f"Cache grew between rounds ({cold_cache_size} → {warm_cache_size}); "
+            "warm round wrote new entries instead of hitting cache"
+        )
+        # Warm should be at least 3× faster. In practice it's >10× — keep
+        # the assertion loose so CPU-starved CI doesn't false-flag.
+        assert warm_elapsed * 3 <= cold_elapsed, (
+            f"Warm-cache reindex was not significantly faster: "
+            f"cold={cold_elapsed:.2f}s warm={warm_elapsed:.2f}s"
+        )
+    finally:
+        _stop_server(env, hermit_home, proc)
+
+
+# ────────────────────────────────────────────────────────────────
+#                  9. KB lifecycle edge cases
+# ────────────────────────────────────────────────────────────────
+
+
+def test_kb_remove_during_indexing(deployment, large_docs_dir):
+    """``kb remove`` mid-indexing cancels the worker and cleans up cleanly.
+
+    The DELETE /collections/<name> handler calls cancel_collection_tasks
+    and then waits up to 30s for the worker to drain. Verifies:
+      * remove returns success without 409 (drained in time)
+      * collection no longer present in /health
+      * the same name can be re-added immediately afterwards
+    """
+    env = deployment["env"]
+    hermit_home = deployment["hermit_home"]
+
+    rc, _ = _run_hermit(["kb", "add", "remove_mid", str(large_docs_dir)], env=env)
+    assert rc == 0
+
+    proc, port = _start_server(env, hermit_home)
+    try:
+        # Wait until at least one task is in flight so we're really
+        # exercising the cancel path, not just a pre-empty queue.
+        deadline = time.monotonic() + 10
+        saw_pending = False
+        while time.monotonic() < deadline:
+            try:
+                tasks = _get(port, f"/collections/remove_mid/tasks")
+                if tasks.get("pending_tasks", 0) > 0:
+                    saw_pending = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.05)
+        if not saw_pending:
+            print("NOTE: indexing finished before remove window")
+
+        rc, output = _run_hermit(["kb", "remove", "remove_mid"], env=env)
+        assert rc == 0, f"kb remove failed: {output}"
+        assert output.get("status") == "removed"
+
+        health = _get(port, "/health")
+        names = {c["name"] for c in health.get("collections", [])}
+        assert "remove_mid" not in names
+
+        # /collections/<>/tasks must 404 once the collection is gone
+        tasks_url = f"http://127.0.0.1:{port}/collections/remove_mid/tasks"
+        try:
+            urllib.request.urlopen(tasks_url, timeout=5)
+            pytest.fail("tasks endpoint should 404 after remove")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+
+        # Re-adding the same name must succeed (registry / qdrant slot freed)
+        rc, _ = _run_hermit(["kb", "add", "remove_mid", str(large_docs_dir)], env=env)
+        assert rc == 0
+    finally:
+        _stop_server(env, hermit_home, proc)
+
+
+def test_kb_incremental_file_modification(deployment, tmp_path):
+    """Editing a file → /sync re-embeds only that file; peers untouched.
+
+    Uses three docs with distinctive made-up tokens so search ordering
+    is deterministic. Verifies the modified doc's chunks were replaced
+    (old token no longer searchable, new token returned) while peers
+    keep returning their original tokens.
+    """
+    env = deployment["env"]
+    hermit_home = deployment["hermit_home"]
+
+    docs = tmp_path / f"incdocs_{deployment['mode']}"
+    docs.mkdir()
+    (docs / "doc_a.md").write_text(
+        "# Doc A\n\nThe rare token zorblax appears in document A only.\n"
+    )
+    (docs / "doc_b.md").write_text(
+        "# Doc B\n\nThe rare token kwirvex appears in document B only.\n"
+    )
+    (docs / "doc_c.md").write_text(
+        "# Doc C\n\nThe rare token plumbat appears in document C only.\n"
+    )
+
+    rc, _ = _run_hermit(["kb", "add", "inc_col", str(docs)], env=env)
+    assert rc == 0
+
+    proc, port = _start_server(env, hermit_home)
+    try:
+        _post(port, "/collections/inc_col/sync", {})
+        assert _poll_indexing_done(port, "inc_col", timeout=60)
+        before = _get(port, "/collections/inc_col/status")
+        assert before["indexed_files"] == 3
+
+        def _top_source(query: str) -> str | None:
+            r = _post(port, "/search", {
+                "collection": "inc_col", "query": query, "top_k": 3,
+            })["results"]
+            return Path(r[0]["source_file"]).name if r else None
+
+        assert _top_source("zorblax") == "doc_a.md"
+        assert _top_source("kwirvex") == "doc_b.md"
+        assert _top_source("plumbat") == "doc_c.md"
+
+        # Modify only doc_a: replace zorblax → snurfle
+        (docs / "doc_a.md").write_text(
+            "# Doc A\n\nThe rare token snurfle now appears in document A.\n"
+        )
+
+        _post(port, "/collections/inc_col/sync", {})
+        assert _poll_indexing_done(port, "inc_col", timeout=60)
+        after = _get(port, "/collections/inc_col/status")
+        assert after["indexed_files"] == 3
+        # Chunk count should be unchanged because we replaced one chunk
+        # with another of similar size — this is a soft check, allow ±2
+        assert abs(after["total_chunks"] - before["total_chunks"]) <= 2
+
+        # New token finds doc_a
+        assert _top_source("snurfle") == "doc_a.md"
+        # Untouched peers still found by their tokens
+        assert _top_source("kwirvex") == "doc_b.md"
+        assert _top_source("plumbat") == "doc_c.md"
+        # Old token no longer points at doc_a (chunk was replaced)
+        # We don't assert "no results" because BM25 may still match the
+        # query string lexically against unrelated chunks; we assert
+        # only that doc_a is no longer the top result.
+        assert _top_source("zorblax") != "doc_a.md"
+    finally:
+        _stop_server(env, hermit_home, proc)
+
+
+def test_multiple_collections_isolated(deployment, tmp_path):
+    """Two collections on the same server: searches don't bleed across them."""
+    env = deployment["env"]
+    hermit_home = deployment["hermit_home"]
+
+    apples_dir = tmp_path / f"apples_{deployment['mode']}"
+    apples_dir.mkdir()
+    (apples_dir / "fruit.md").write_text(
+        "# Apples\n\nThe orchard grows crisp red apples and golden delicious "
+        "varieties. Apple cider is pressed from McIntosh apples in autumn.\n"
+    )
+
+    cars_dir = tmp_path / f"cars_{deployment['mode']}"
+    cars_dir.mkdir()
+    (cars_dir / "engine.md").write_text(
+        "# Cars\n\nThe internal combustion engine powers most automobiles. "
+        "Pistons, cylinders, and crankshafts convert fuel to mechanical motion.\n"
+    )
+
+    rc, _ = _run_hermit(["kb", "add", "kb_apples", str(apples_dir)], env=env)
+    assert rc == 0
+    rc, _ = _run_hermit(["kb", "add", "kb_cars", str(cars_dir)], env=env)
+    assert rc == 0
+
+    proc, port = _start_server(env, hermit_home)
+    try:
+        _post(port, "/collections/kb_apples/sync", {})
+        _post(port, "/collections/kb_cars/sync", {})
+        assert _poll_indexing_done(port, "kb_apples", timeout=60)
+        assert _poll_indexing_done(port, "kb_cars", timeout=60)
+
+        # Apple query in kb_apples returns apple content
+        a_results = _post(port, "/search", {
+            "collection": "kb_apples", "query": "apple cider orchard", "top_k": 3,
+        })["results"]
+        assert len(a_results) > 0
+        for r in a_results:
+            assert "apple" in r["text"].lower(), (
+                f"kb_apples returned non-apple content: {r['text'][:80]}"
+            )
+
+        # Same query in kb_cars: source must be from cars_dir, never apples_dir
+        c_results = _post(port, "/search", {
+            "collection": "kb_cars", "query": "apple cider orchard", "top_k": 3,
+        })["results"]
+        for r in c_results:
+            src = r["source_file"]
+            assert "apples_" not in src and "fruit.md" not in src, (
+                f"kb_cars leaked apples content: {src}"
+            )
+
+        # Engine query in kb_cars returns car content; in kb_apples it must
+        # not return car-source files.
+        e_apples = _post(port, "/search", {
+            "collection": "kb_apples", "query": "internal combustion engine", "top_k": 3,
+        })["results"]
+        for r in e_apples:
+            src = r["source_file"]
+            assert "cars_" not in src and "engine.md" not in src, (
+                f"kb_apples leaked cars content: {src}"
+            )
+    finally:
+        _stop_server(env, hermit_home, proc)
+
+
+# ────────────────────────────────────────────────────────────────
+#                  10. Graceful shutdown / concurrency
+# ────────────────────────────────────────────────────────────────
+
+
+def test_sigterm_during_indexing_drains_cleanly(deployment, large_docs_dir):
+    """``hermit stop`` (SIGTERM) mid-indexing exits cleanly; restart finishes.
+
+    Validates that interrupting the worker via the user-facing graceful
+    path leaves a consistent state — restart must complete indexing
+    without losing or duplicating files (final indexed_files matches
+    on-disk file count).
+    """
+    env = deployment["env"]
+    hermit_home = deployment["hermit_home"]
+
+    rc, _ = _run_hermit(["kb", "add", "term_col", str(large_docs_dir)], env=env)
+    assert rc == 0
+
+    proc, port = _start_server(env, hermit_home)
+    saw_pending = False
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                tasks = _get(port, "/collections/term_col/tasks")
+                if tasks.get("pending_tasks", 0) > 0:
+                    saw_pending = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.05)
+
+        # Send SIGTERM via the user-facing path (hermit stop)
+        stop_start = time.monotonic()
+        result = subprocess.run(
+            [sys.executable, "-m", "hermit.cli", "stop"],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        stop_elapsed = time.monotonic() - stop_start
+
+        assert result.returncode == 0, (
+            f"hermit stop exited {result.returncode}: {result.stderr}"
+        )
+        # The CLI's stop wrapper bounds itself to ~10s before SIGKILL
+        assert stop_elapsed < 30, f"hermit stop took {stop_elapsed:.1f}s"
+        # Process should be gone
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            pytest.fail("Hermit server still running after hermit stop")
+    finally:
+        _terminate_hermit_server(hermit_home)
+        (hermit_home / "hermit.pid").unlink(missing_ok=True)
+
+    if not saw_pending:
+        print("NOTE: indexing finished before SIGTERM window; "
+              "testing clean shutdown only")
+
+    # Restart and verify the collection finishes indexing
+    proc, port = _start_server(env, hermit_home)
+    try:
+        assert _poll_indexing_done(port, "term_col", timeout=120)
+        status = _get(port, "/collections/term_col/status")
+        on_disk = sum(1 for _ in large_docs_dir.glob("*.md"))
+        assert status["indexed_files"] == on_disk, (
+            f"After SIGTERM+restart: indexed_files={status['indexed_files']} "
+            f"≠ on-disk={on_disk}"
+        )
+        results = _post(port, "/search", {
+            "collection": "term_col",
+            "query": "hybrid retrieval reranking",
+            "top_k": 3,
+        })["results"]
+        assert len(results) > 0
+    finally:
+        _stop_server(env, hermit_home, proc)
+
+
+def test_search_concurrent_with_indexing(deployment, large_docs_dir):
+    """Search remains responsive while a large indexing job is in flight.
+
+    Validates the single-INDEX_WORKERS / shared-ONNX-session design: a
+    background indexing job must not block search calls. Hammers /search
+    every 100ms while indexing is in progress and asserts:
+      * zero non-2xx responses
+      * the indexing job still completes
+    """
+    import threading
+
+    env = deployment["env"]
+    hermit_home = deployment["hermit_home"]
+
+    rc, _ = _run_hermit(["kb", "add", "concur_col", str(large_docs_dir)], env=env)
+    assert rc == 0
+
+    proc, port = _start_server(env, hermit_home)
+    stop_evt = threading.Event()
+    errors: list[str] = []
+    success_count = 0
+    success_lock = threading.Lock()
+
+    def _hammer():
+        nonlocal success_count
+        while not stop_evt.is_set():
+            try:
+                _post(port, "/search", {
+                    "collection": "concur_col",
+                    "query": "hybrid retrieval reranking",
+                    "top_k": 3,
+                })
+                with success_lock:
+                    success_count += 1
+            except Exception as exc:
+                errors.append(str(exc))
+            time.sleep(0.1)
+
+    t = threading.Thread(target=_hammer, daemon=True)
+    try:
+        t.start()
+        assert _poll_indexing_done(port, "concur_col", timeout=120)
+        # Drain a few more search hits after indexing finishes so the
+        # success_count reflects steady-state behaviour too.
+        time.sleep(0.5)
+    finally:
+        stop_evt.set()
+        t.join(timeout=5)
+        _stop_server(env, hermit_home, proc)
+
+    assert errors == [], (
+        f"Search calls failed during indexing ({len(errors)} errors): "
+        f"first={errors[0] if errors else None}"
+    )
+    assert success_count >= 5, (
+        f"Only {success_count} successful searches — fixture too short?"
+    )
+
+
+# ────────────────────────────────────────────────────────────────
+#                  11. Reverse mode-switching
+# ────────────────────────────────────────────────────────────────
+
+
+def test_switch_standalone_to_local_preserves_data(tmp_path, test_docs_dir):
+    """Mirror of test_switch_local_to_standalone, in the opposite direction.
+
+    Index in Stand-alone mode (Docker-managed), stop, switch the same
+    HERMIT_HOME to Local mode. The signature mismatch must trigger a
+    transparent rebuild and search must continue to work.
+    """
+    hermit_home = tmp_path / "hermit_revswitch"
+    hermit_home.mkdir()
+    _link_models(hermit_home)
+
+    sa_env, container_name = _make_standalone_env(hermit_home)
+    rc, _ = _run_hermit(["kb", "add", "rev_col", str(test_docs_dir)], env=sa_env)
+    assert rc == 0
+
+    proc, port = _start_server(sa_env, hermit_home)
+    sa_chunks: int | None = None
+    sa_files: int | None = None
+    try:
+        assert _poll_indexing_done(port, "rev_col", timeout=60)
+        s = _get(port, "/collections/rev_col/status")
+        sa_chunks, sa_files = s["total_chunks"], s["indexed_files"]
+        assert sa_chunks > 0
+    finally:
+        _stop_server(sa_env, hermit_home, proc)
+        # Standalone container must be removed before switching modes —
+        # otherwise port 6333 from this run could collide with the local
+        # mode's safeguard probe.
+        _remove_container(container_name)
+
+    local_env, _ = _make_local_env(hermit_home)
+    proc, port = _start_server(local_env, hermit_home)
+    try:
+        health = _get(port, "/health")
+        assert health["qdrant_mode"] == "local"
+        assert _poll_indexing_done(port, "rev_col", timeout=60)
+        s = _get(port, "/collections/rev_col/status")
+        assert s["total_chunks"] == sa_chunks, (
+            f"Reverse-switch chunk drift: standalone={sa_chunks} → "
+            f"local={s['total_chunks']}"
+        )
+        assert s["indexed_files"] == sa_files
+        results = _post(port, "/search", {
+            "collection": "rev_col",
+            "query": "hermit knowledge base",
+            "top_k": 3,
+        })["results"]
+        assert len(results) > 0
+    finally:
+        _stop_server(local_env, hermit_home, proc)
+
+
+# ────────────────────────────────────────────────────────────────
+#                  12. Stand-alone container resilience
+# ────────────────────────────────────────────────────────────────
+
+
+def test_standalone_container_restart_is_transparent(
+    standalone_only_server, test_docs_dir,
+):
+    """Manually ``docker restart`` the Qdrant container; Hermit recovers.
+
+    Simulates the realistic case where a user restarts Docker Desktop or
+    the container itself. The qdrant-client transparently reconnects, so
+    a search after the restart must succeed without restarting Hermit.
+    """
+    port, deployment = standalone_only_server
+    env = deployment["env"]
+    container_name = deployment["container_name"]
+
+    rc, _ = _run_hermit(["kb", "add", "restart_col", str(test_docs_dir)], env=env)
+    assert rc == 0
+    _post(port, "/collections/restart_col/sync", {})
+    assert _poll_indexing_done(port, "restart_col", timeout=60)
+    pre = _get(port, "/collections/restart_col/status")
+    assert pre["total_chunks"] > 0
+
+    # Restart the Qdrant container (NOT hermit)
+    r = subprocess.run(
+        ["docker", "restart", container_name],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r.returncode == 0, f"docker restart failed: {r.stderr}"
+
+    # Wait for Qdrant to come back up — the client retries internally,
+    # so we just give it some headroom before issuing a search.
+    assert _wait_until(
+        lambda: _container_running(container_name), timeout=15.0,
+    )
+    time.sleep(2.0)  # let Qdrant actually start serving
+
+    deadline = time.monotonic() + 30
+    last_exc: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            results = _post(port, "/search", {
+                "collection": "restart_col",
+                "query": "hermit knowledge base",
+                "top_k": 3,
+            })["results"]
+            assert len(results) > 0, "Search returned 0 results after restart"
+            break
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(1.0)
+    else:
+        pytest.fail(f"Search never recovered after docker restart: {last_exc}")
+
+    post = _get(port, "/collections/restart_col/status")
+    assert post["total_chunks"] == pre["total_chunks"], (
+        "Container restart caused chunk count drift"
+    )
+
+
+# ────────────────────────────────────────────────────────────────
+#                  13. Server lifecycle
+# ────────────────────────────────────────────────────────────────
+
+
+def test_port_conflict_falls_back_to_alternate_port(tmp_path):
+    """If port.json points at an occupied port, ``resolve_port`` falls back.
+
+    Pre-writes port.json with a port we hold open via a bound socket;
+    expects hermit to detect the conflict and pick a different port,
+    then to write the new port back so subsequent CLI calls find it.
+    """
+    hermit_home = tmp_path / "hermit_portconflict"
+    hermit_home.mkdir()
+    _link_models(hermit_home)
+    env, _ = _make_local_env(hermit_home)
+
+    # Bind a socket and hold it for the duration of the test
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    occupied = sock.getsockname()[1]
+
+    port_file = hermit_home / "port.json"
+    port_file.write_text(json.dumps({"port": occupied}))
+    pre_mtime = port_file.stat().st_mtime
+
+    try:
+        # Launch hermit start manually — _start_server's _read_port_file
+        # would race against hermit overwriting the pre-seeded port.json.
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "hermit.cli", "start"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            # Wait for hermit to overwrite port.json with its chosen port
+            deadline = time.monotonic() + 30
+            actual_port: int | None = None
+            while time.monotonic() < deadline:
+                if port_file.exists() and port_file.stat().st_mtime > pre_mtime:
+                    try:
+                        actual_port = int(json.loads(port_file.read_text())["port"])
+                        break
+                    except (json.JSONDecodeError, KeyError, ValueError):
+                        pass
+                time.sleep(0.1)
+            assert actual_port is not None, "port.json was never overwritten"
+            assert actual_port != occupied, (
+                f"Hermit started on occupied port {occupied} — "
+                "port-conflict fallback failed"
+            )
+            assert _poll_health(actual_port, timeout=120)
+            assert _get(actual_port, "/health")["status"] == "ready"
+        finally:
+            _stop_server(env, hermit_home, proc)
+    finally:
+        sock.close()
