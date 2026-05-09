@@ -28,6 +28,24 @@ _RERANK_DEFAULT = {
 
 _GLOB_CHARS = set("*?[")
 
+# Fuzzy mode pagination knobs.
+#
+# Why we paginate: scroll() returns at most N points per call, so fetching only
+# the first page silently truncates results past the page boundary — for a
+# 30k-chunk collection a fuzzy hit that happens to live at chunk 5000 would
+# never be returned. We page through scroll until either (a) the cursor is
+# exhausted, or (b) we have scanned _FUZZY_MAX_SCAN points (safety cap to
+# prevent a query from walking an unbounded collection).
+#
+# NOTE on local mode: in embedded Qdrant, payload indexes are no-ops, so even
+# with a Qdrant-side TEXT filter the engine still does a full Python-level
+# linear scan internally. That is fine at personal scale but not at hundreds
+# of thousands of chunks. A real fix needs either a separate server (Qdrant
+# stand-alone, where TEXT indexes work and we already branch on this) or a
+# locally-built inverted index. Tracked as future work.
+_FUZZY_PAGE_SIZE = 1024
+_FUZZY_MAX_SCAN = 100_000
+
 
 def search(
     collection_name: str,
@@ -165,41 +183,81 @@ def _fuzzy_search(
 ) -> list[dict]:
     """LIKE-style substring match on chunk text and/or filename.
 
-    Uses the filename Qdrant filter as a coarse pre-filter (when applicable),
-    then applies a case-insensitive Python `in` check on the chunk text. This
-    gives true substring semantics consistently in both local (embedded) and
-    stand-alone Qdrant modes — Qdrant local mode treats payload indexes as
-    no-ops and its MatchText is case-sensitive, so we can't rely on it for
-    LIKE semantics.
+    Strategy:
+      1. Build a server-side filter:
+         - filename substring → MatchText on `filename` payload (always)
+         - text query → MatchText on `text` payload (stand-alone mode only;
+           local mode payload indexes are no-ops and case-sensitive, so we
+           keep the text match in Python there)
+      2. Page through scroll until exhausted or _FUZZY_MAX_SCAN reached.
+      3. Apply Python post-filters: glob (always) + text substring (always —
+         even in stand-alone mode, MatchText is token-level so we still
+         verify true substring semantics here).
+      4. Sort by (source_file, chunk_index), trim to top_k.
     """
-    # Page size — large enough to cover most personal-scale collections in
-    # one round-trip without re-paginating.
-    fetch_limit = max(top_k * 16, 1024)
-    points, _ = qdrant.scroll_points(
-        collection_name=collection_name,
-        scroll_filter=base_filter,
-        limit=fetch_limit,
-        with_payload=True,
-    )
+    scroll_filter = _fuzzy_scroll_filter(query, base_filter)
+    needle = query.lower() if query else None
 
-    if glob_pattern is not None:
-        points = [
-            p for p in points
-            if _glob_matches(p.payload.get("source_file", ""), glob_pattern)
-        ]
+    matches: list = []
+    offset = None
+    scanned = 0
+    while True:
+        points, next_offset = qdrant.scroll_points(
+            collection_name=collection_name,
+            scroll_filter=scroll_filter,
+            limit=_FUZZY_PAGE_SIZE,
+            with_payload=True,
+            offset=offset,
+        )
+        scanned += len(points)
 
-    if query:
-        needle = query.lower()
-        points = [
-            p for p in points
-            if needle in p.payload.get("text", "").lower()
-        ]
+        if glob_pattern is not None:
+            points = [
+                p for p in points
+                if _glob_matches(p.payload.get("source_file", ""), glob_pattern)
+            ]
+        if needle is not None:
+            points = [
+                p for p in points
+                if needle in p.payload.get("text", "").lower()
+            ]
+        matches.extend(points)
 
-    points.sort(key=lambda p: (
+        if next_offset is None or scanned >= _FUZZY_MAX_SCAN:
+            break
+        offset = next_offset
+
+    if scanned >= _FUZZY_MAX_SCAN:
+        logger.warning(
+            "fuzzy search hit scan cap (%d) on collection '%s'; results may be incomplete",
+            _FUZZY_MAX_SCAN, collection_name,
+        )
+
+    matches.sort(key=lambda p: (
         p.payload.get("source_file", ""),
         p.payload.get("chunk_index", 0),
     ))
-    return [_result_to_dict(p, score=None) for p in points[:top_k]]
+    return [_result_to_dict(p, score=None) for p in matches[:top_k]]
+
+
+def _fuzzy_scroll_filter(
+    query: str,
+    base_filter: models.Filter | None,
+) -> models.Filter | None:
+    """Compose the server-side filter for fuzzy mode.
+
+    In stand-alone Qdrant we add `MatchText(text=query)` to leverage the TEXT
+    payload index for cheap pre-filtering. In local (embedded) mode we skip
+    it: payload indexes are no-ops there and MatchText is case-sensitive, so
+    adding it would only mask matches without speeding anything up.
+    """
+    must = list(base_filter.must) if base_filter else []
+    if query and qdrant.is_standalone_mode():
+        must.append(models.FieldCondition(
+            key="text",
+            match=models.MatchText(text=query),
+        ))
+    return models.Filter(must=must) if must else None
 
 
 # ── Filter helpers ────────────────────────────────────────────────

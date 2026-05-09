@@ -233,3 +233,130 @@ class TestFilenameFilter:
         assert results
         assert all(r["source_file"] == "/notes/faq.md" for r in results)
         assert all("hermit" in r["text"].lower() for r in results)
+
+
+# ── Pagination correctness (regression for 1024-truncation bug) ───
+
+
+class TestFuzzyPagination:
+
+    def test_fuzzy_finds_match_past_first_page(self, search_env, monkeypatch):
+        """Insert > _FUZZY_PAGE_SIZE points; needle lives in the last one.
+
+        Without pagination, scroll returns only the first page and the match
+        is silently dropped. With pagination, we walk the cursor until the
+        match is found.
+        """
+        import hermit.retrieval.searcher as sch
+        from hermit.retrieval.searcher import search
+
+        # Shrink the page size to keep the test fast. The pagination loop
+        # itself is what we exercise; absolute counts don't matter.
+        monkeypatch.setattr(sch, "_FUZZY_PAGE_SIZE", 50)
+
+        qmod, col = search_env
+
+        # Add 120 filler points (no needle) then 1 needle point at the end.
+        ids, dvecs, svecs, payloads = [], [], [], []
+        for i in range(120):
+            ids.append(str(uuid.uuid5(uuid.NAMESPACE_DNS, f"filler-{i}")))
+            dvecs.append(_rand_dense(seed=10000 + i))
+            svecs.append(_fake_sparse([i % 100]))
+            payloads.append({
+                "text": f"unrelated content block {i}",
+                "title": "filler",
+                "filename": "filler",
+                "source_file": f"/filler/file_{i:04d}.md",
+                "chunk_index": 0,
+                "total_chunks": 1,
+            })
+        # Final needle chunk
+        ids.append(str(uuid.uuid5(uuid.NAMESPACE_DNS, "needle")))
+        dvecs.append(_rand_dense(seed=99999))
+        svecs.append(_fake_sparse([42]))
+        payloads.append({
+            "text": "this chunk contains the rare-needle-token UNICORN",
+            "title": "needle",
+            "filename": "needle",
+            "source_file": "/notes/last.md",
+            "chunk_index": 0,
+            "total_chunks": 1,
+        })
+        qmod.upsert_chunks(col, ids, dvecs, svecs, payloads)
+
+        results = search(col, "UNICORN", top_k=5, mode="fuzzy")
+        assert len(results) == 1
+        assert results[0]["source_file"] == "/notes/last.md"
+
+    def test_fuzzy_respects_max_scan_cap(self, search_env, monkeypatch, caplog):
+        """When _FUZZY_MAX_SCAN is hit, we stop and emit a warning."""
+        import logging
+        import hermit.retrieval.searcher as sch
+        from hermit.retrieval.searcher import search
+
+        monkeypatch.setattr(sch, "_FUZZY_PAGE_SIZE", 10)
+        monkeypatch.setattr(sch, "_FUZZY_MAX_SCAN", 20)
+
+        qmod, col = search_env
+        # Add 30 filler points so the scroll has enough to hit the cap.
+        ids, dvecs, svecs, payloads = [], [], [], []
+        for i in range(30):
+            ids.append(str(uuid.uuid5(uuid.NAMESPACE_DNS, f"capfill-{i}")))
+            dvecs.append(_rand_dense(seed=70000 + i))
+            svecs.append(_fake_sparse([i]))
+            payloads.append({
+                "text": f"filler {i}",
+                "title": "filler",
+                "filename": "filler",
+                "source_file": f"/cap/file_{i}.md",
+                "chunk_index": 0,
+                "total_chunks": 1,
+            })
+        qmod.upsert_chunks(col, ids, dvecs, svecs, payloads)
+
+        with caplog.at_level(logging.WARNING, logger="hermit.retrieval.searcher"):
+            search(col, "no-such-needle-token", top_k=5, mode="fuzzy")
+
+        assert any("scan cap" in rec.message for rec in caplog.records)
+
+
+# ── Standalone-mode TEXT pre-filter ───────────────────────────────
+
+
+class TestFuzzyStandaloneFilter:
+
+    def test_local_mode_no_text_match_in_filter(self, search_env):
+        """Local mode: filter should NOT include MatchText on text (would mask matches)."""
+        from hermit.retrieval.searcher import _fuzzy_scroll_filter
+        f = _fuzzy_scroll_filter("anything", base_filter=None)
+        assert f is None  # no filename filter, no standalone → no filter
+
+    def test_standalone_mode_adds_text_match(self, search_env, monkeypatch):
+        """Standalone mode: MatchText(text=query) is added to the filter."""
+        from qdrant_client import models as qmodels
+        import hermit.storage.qdrant as qmod
+        from hermit.retrieval.searcher import _fuzzy_scroll_filter
+
+        monkeypatch.setattr(qmod, "is_standalone_mode", lambda: True)
+
+        f = _fuzzy_scroll_filter("Qdrant", base_filter=None)
+        assert f is not None
+        assert len(f.must) == 1
+        cond = f.must[0]
+        assert isinstance(cond, qmodels.FieldCondition)
+        assert cond.key == "text"
+        assert cond.match.text == "Qdrant"
+
+    def test_standalone_combines_filename_and_text_filters(self, search_env, monkeypatch):
+        """Standalone mode: filename + text filters compose under `must`."""
+        from qdrant_client import models as qmodels
+        import hermit.storage.qdrant as qmod
+        from hermit.retrieval.searcher import _build_filter, _fuzzy_scroll_filter
+
+        monkeypatch.setattr(qmod, "is_standalone_mode", lambda: True)
+
+        base, _ = _build_filter("design")
+        f = _fuzzy_scroll_filter("Qdrant", base_filter=base)
+        assert f is not None
+        keys = sorted(c.key for c in f.must)
+        assert keys == ["filename", "text"]
