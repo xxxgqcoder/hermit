@@ -1,11 +1,32 @@
+import fnmatch
 import logging
+from typing import Literal
+
 from qdrant_client import models
 
-from hermit.config import DEFAULT_RERANK_CANDIDATES, DEFAULT_W_DENSE, DEFAULT_W_SPARSE
+from hermit.config import (
+    DEFAULT_RERANK_CANDIDATES,
+    DEFAULT_SEARCH_MODE,
+    DEFAULT_W_DENSE,
+    DEFAULT_W_SPARSE,
+)
 from hermit.retrieval import embedder, reranker
 from hermit.storage import qdrant
 
 logger = logging.getLogger(__name__)
+
+
+SearchMode = Literal["hybrid", "semantic", "keyword", "fuzzy"]
+
+# Modes that run cross-encoder rerank by default.
+_RERANK_DEFAULT = {
+    "hybrid": True,
+    "semantic": True,
+    "keyword": False,
+    "fuzzy": False,
+}
+
+_GLOB_CHARS = set("*?[")
 
 
 def search(
@@ -15,55 +36,211 @@ def search(
     w_dense: float = DEFAULT_W_DENSE,
     w_sparse: float = DEFAULT_W_SPARSE,
     rerank_candidates: int = DEFAULT_RERANK_CANDIDATES,
+    mode: SearchMode = DEFAULT_SEARCH_MODE,
+    filename: str | None = None,
+    rerank: bool | None = None,
 ) -> list[dict]:
-    """Hybrid search with reranking. Returns list of result dicts."""
-    dense_vec = embedder.embed_query_dense(query)
-    sparse_vec = embedder.embed_query_sparse(query)
-    candidate_limit = max(top_k, rerank_candidates)
+    """Search a collection. Returns list of result dicts.
 
-    # Thread-safe query via qdrant module lock
-    results = qdrant.query_points(
-        collection_name=collection_name,
-        prefetch=[
-            models.Prefetch(
-                query=dense_vec,
-                using="dense",
-                limit=candidate_limit,
-            ),
-            models.Prefetch(
-                query=models.SparseVector(
-                    indices=sparse_vec.indices.tolist(),
-                    values=sparse_vec.values.tolist(),
-                ),
-                using="sparse",
-                limit=candidate_limit,
-            ),
-        ],
-        query=models.FusionQuery(fusion=models.Fusion.RRF),
-        limit=candidate_limit,
-        with_payload=True,
-    ).points
+    Modes:
+      - hybrid:   dense + sparse RRF + rerank (default)
+      - semantic: dense only + rerank
+      - keyword:  sparse (BM25) only, rerank off by default
+      - fuzzy:    no vectors; Qdrant scroll with MatchText on text/filename,
+                  rerank off by default
+    """
+    qdrant_filter, glob_pattern = _build_filter(filename)
 
-    if not results:
+    if mode == "fuzzy":
+        return _fuzzy_search(
+            collection_name,
+            query=query,
+            base_filter=qdrant_filter,
+            glob_pattern=glob_pattern,
+            top_k=top_k,
+        )
+
+    candidates = _vector_recall(
+        collection_name,
+        query=query,
+        mode=mode,
+        rerank_candidates=rerank_candidates,
+        top_k=top_k,
+        qdrant_filter=qdrant_filter,
+    )
+
+    if glob_pattern is not None:
+        candidates = [
+            r for r in candidates
+            if _glob_matches(r.payload.get("source_file", ""), glob_pattern)
+        ]
+
+    if not candidates:
         return []
 
-    # Extract texts for reranking
-    passages = [r.payload["text"] for r in results]
+    do_rerank = _RERANK_DEFAULT[mode] if rerank is None else rerank
+    if do_rerank:
+        passages = [r.payload["text"] for r in candidates]
+        top_indices = reranker.rerank(query, passages, top_k=top_k)
+        return [_result_to_dict(candidates[i]) for i in top_indices]
 
-    # Rerank
-    top_indices = reranker.rerank(query, passages, top_k=top_k)
-
-    output = []
-    for idx in top_indices:
-        output.append(_result_to_dict(results[idx]))
-    return output
+    return [_result_to_dict(r) for r in candidates[:top_k]]
 
 
-def _result_to_dict(result) -> dict:
+# ── Mode implementations ──────────────────────────────────────────
+
+
+def _vector_recall(
+    collection_name: str,
+    query: str,
+    mode: SearchMode,
+    rerank_candidates: int,
+    top_k: int,
+    qdrant_filter: models.Filter | None,
+) -> list:
+    """Run vector recall for hybrid/semantic/keyword. Returns list of points."""
+    candidate_limit = max(top_k, rerank_candidates)
+
+    if mode == "hybrid":
+        dense_vec = embedder.embed_query_dense(query)
+        sparse_vec = embedder.embed_query_sparse(query)
+        results = qdrant.query_points(
+            collection_name=collection_name,
+            prefetch=[
+                models.Prefetch(
+                    query=dense_vec,
+                    using="dense",
+                    limit=candidate_limit,
+                    filter=qdrant_filter,
+                ),
+                models.Prefetch(
+                    query=models.SparseVector(
+                        indices=sparse_vec.indices.tolist(),
+                        values=sparse_vec.values.tolist(),
+                    ),
+                    using="sparse",
+                    limit=candidate_limit,
+                    filter=qdrant_filter,
+                ),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=candidate_limit,
+            with_payload=True,
+        ).points
+    elif mode == "semantic":
+        dense_vec = embedder.embed_query_dense(query)
+        results = qdrant.query_points(
+            collection_name=collection_name,
+            query=dense_vec,
+            using="dense",
+            query_filter=qdrant_filter,
+            limit=candidate_limit,
+            with_payload=True,
+        ).points
+    elif mode == "keyword":
+        sparse_vec = embedder.embed_query_sparse(query)
+        results = qdrant.query_points(
+            collection_name=collection_name,
+            query=models.SparseVector(
+                indices=sparse_vec.indices.tolist(),
+                values=sparse_vec.values.tolist(),
+            ),
+            using="sparse",
+            query_filter=qdrant_filter,
+            limit=candidate_limit,
+            with_payload=True,
+        ).points
+    else:
+        raise ValueError(f"unsupported vector recall mode: {mode!r}")
+
+    return list(results)
+
+
+def _fuzzy_search(
+    collection_name: str,
+    query: str,
+    base_filter: models.Filter | None,
+    glob_pattern: str | None,
+    top_k: int,
+) -> list[dict]:
+    """LIKE-style substring match on chunk text and/or filename.
+
+    Uses the filename Qdrant filter as a coarse pre-filter (when applicable),
+    then applies a case-insensitive Python `in` check on the chunk text. This
+    gives true substring semantics consistently in both local (embedded) and
+    stand-alone Qdrant modes — Qdrant local mode treats payload indexes as
+    no-ops and its MatchText is case-sensitive, so we can't rely on it for
+    LIKE semantics.
+    """
+    # Page size — large enough to cover most personal-scale collections in
+    # one round-trip without re-paginating.
+    fetch_limit = max(top_k * 16, 1024)
+    points, _ = qdrant.scroll_points(
+        collection_name=collection_name,
+        scroll_filter=base_filter,
+        limit=fetch_limit,
+        with_payload=True,
+    )
+
+    if glob_pattern is not None:
+        points = [
+            p for p in points
+            if _glob_matches(p.payload.get("source_file", ""), glob_pattern)
+        ]
+
+    if query:
+        needle = query.lower()
+        points = [
+            p for p in points
+            if needle in p.payload.get("text", "").lower()
+        ]
+
+    points.sort(key=lambda p: (
+        p.payload.get("source_file", ""),
+        p.payload.get("chunk_index", 0),
+    ))
+    return [_result_to_dict(p, score=None) for p in points[:top_k]]
+
+
+# ── Filter helpers ────────────────────────────────────────────────
+
+
+def _build_filter(filename: str | None) -> tuple[models.Filter | None, str | None]:
+    """Return (qdrant_filter, glob_pattern).
+
+    - Plain substring (no glob chars): MatchText on `filename` payload.
+    - Glob pattern (contains *?[): no Qdrant pre-filter, callers must apply
+      `glob_pattern` as a Python post-filter against `source_file`.
+    """
+    if not filename:
+        return None, None
+    if any(c in filename for c in _GLOB_CHARS):
+        return None, filename.lower()
+    return models.Filter(must=[
+        models.FieldCondition(
+            key="filename",
+            match=models.MatchText(text=filename.lower()),
+        )
+    ]), None
+
+
+def _glob_matches(source_file: str, pattern: str) -> bool:
+    """Match pattern against either the full path or just the basename, lowercased."""
+    sf = source_file.lower()
+    from pathlib import PurePath
+    base = PurePath(sf).name
+    return fnmatch.fnmatch(sf, pattern) or fnmatch.fnmatch(base, pattern)
+
+
+# ── Result formatting ─────────────────────────────────────────────
+
+
+def _result_to_dict(result, score=...) -> dict:
+    s = result.score if score is ... else score
     return {
         "text": result.payload["text"],
         "source_file": result.payload["source_file"],
         "chunk_index": result.payload["chunk_index"],
         "total_chunks": result.payload["total_chunks"],
-        "score": result.score,
+        "score": s,
     }

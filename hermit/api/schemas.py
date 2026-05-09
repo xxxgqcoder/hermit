@@ -1,20 +1,46 @@
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 
 from hermit.config import (
     DEFAULT_RERANK_CANDIDATES,
+    DEFAULT_SEARCH_MODE,
     DEFAULT_TOP_K,
     DEFAULT_W_DENSE,
     DEFAULT_W_SPARSE,
 )
 
 
+SearchMode = Literal["hybrid", "semantic", "keyword", "fuzzy"]
+
+
 class SearchRequest(BaseModel):
-    query: str
+    query: str = ""
     collection: str
     top_k: int = DEFAULT_TOP_K
     w_dense: float = Field(DEFAULT_W_DENSE, ge=0, le=1)
     w_sparse: float = Field(DEFAULT_W_SPARSE, ge=0, le=1)
     rerank_candidates: int = DEFAULT_RERANK_CANDIDATES
+    mode: SearchMode = DEFAULT_SEARCH_MODE
+    # Substring or glob (`*`/`?`) match against the filename stem (basename
+    # without extension).  Orthogonal to `mode`.
+    filename: str | None = None
+    # Override the per-mode default for cross-encoder reranking. None = use the
+    # mode's default (hybrid/semantic on, keyword/fuzzy off).
+    rerank: bool | None = None
+
+    @model_validator(mode="after")
+    def _check_query_or_filename(self):
+        if self.mode == "fuzzy":
+            # fuzzy supports query-only, filename-only, or both
+            if not self.query and not self.filename:
+                raise ValueError(
+                    "fuzzy mode requires either `query` or `filename`"
+                )
+        else:
+            if not self.query:
+                raise ValueError(f"`query` is required for mode={self.mode!r}")
+        return self
 
 
 class SearchResult(BaseModel):

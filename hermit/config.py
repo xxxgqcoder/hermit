@@ -36,6 +36,8 @@ DEFAULT_TOP_K = 5
 DEFAULT_W_DENSE = 0.7
 DEFAULT_W_SPARSE = 0.3
 DEFAULT_RERANK_CANDIDATES = 20
+DEFAULT_SEARCH_MODE = "hybrid"
+SEARCH_MODES = ("hybrid", "semantic", "keyword", "fuzzy")
 
 # ONNX Runtime thread control — intra/inter-op threads per ONNX session.
 # Default to 2: ONNX Runtime retains per-thread arenas, so each extra thread

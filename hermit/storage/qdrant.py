@@ -191,10 +191,36 @@ def _create_collection_unlocked(c: QdrantClient, name: str):
             "sparse": models.SparseVectorParams(),
         },
     )
+    # Exact match on full file path — used by delete_by_source_file and
+    # exact-filename filter in search.
     c.create_payload_index(
         collection_name=name,
         field_name="source_file",
         field_schema=models.PayloadSchemaType.KEYWORD,
+    )
+    # Tokenized filename (basename stem, lowercased) for substring filename filter
+    # via MatchText. The "word" tokenizer handles ASCII word boundaries and also
+    # treats each CJK char as its own token, which is enough for substring lookups.
+    c.create_payload_index(
+        collection_name=name,
+        field_name="filename",
+        field_schema=models.TextIndexParams(
+            type=models.TextIndexType.TEXT,
+            tokenizer=models.TokenizerType.WORD,
+            min_token_len=1,
+            lowercase=True,
+        ),
+    )
+    # Tokenized chunk text for fuzzy / keyword substring matching via MatchText.
+    c.create_payload_index(
+        collection_name=name,
+        field_name="text",
+        field_schema=models.TextIndexParams(
+            type=models.TextIndexType.TEXT,
+            tokenizer=models.TokenizerType.WORD,
+            min_token_len=1,
+            lowercase=True,
+        ),
     )
 
 
@@ -326,3 +352,21 @@ def query_points(collection_name: str, **kwargs):
     """Thread-safe wrapper around client().query_points()."""
     with _get_lock():
         return client().query_points(collection_name=collection_name, **kwargs)
+
+
+def scroll_points(
+    collection_name: str,
+    scroll_filter=None,
+    limit: int = 100,
+    with_payload: bool = True,
+    offset=None,
+):
+    """Thread-safe wrapper around client().scroll() returning (points, next_offset)."""
+    with _get_lock():
+        return client().scroll(
+            collection_name=collection_name,
+            scroll_filter=scroll_filter,
+            limit=limit,
+            with_payload=with_payload,
+            offset=offset,
+        )

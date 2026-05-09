@@ -1,11 +1,25 @@
 ---
 name: hermit-search
-description: 'Local semantic search over knowledge base collections powered by Hermit. Use when: searching knowledge base, semantic search, querying documents, managing collections, adding knowledge base, indexing files.'
+description: 'Local search over knowledge base collections powered by Hermit. Supports four search modes (hybrid, semantic, keyword, fuzzy) and orthogonal filename filtering. Use when: searching knowledge base, semantic / keyword / fuzzy search, querying documents, managing collections, adding knowledge base, indexing files.'
 ---
 
 # Skill: hermit-search
 
-Hermit 本地语义搜索服务的使用指南。Hermit 提供基于向量的混合检索（Dense + Sparse）和 Cross-Encoder 精排，支持多知识库管理。
+Hermit 本地知识库检索服务使用指南。Hermit 提供四种搜索模式（hybrid / semantic / keyword / fuzzy）+ 正交的文件名过滤，支持多知识库管理。
+
+## 搜索语义一览
+
+| 模式 | 召回 | Rerank（默认） | 适用场景 |
+|---|---|---|---|
+| `hybrid`（默认） | dense + sparse RRF | ✅ | 通用查询，最强相关性 |
+| `semantic` | dense only | ✅ | "我大概记得意思但不记得用词" |
+| `keyword` | sparse (BM25) only | ❌ | 关键词精确命中、最快 |
+| `fuzzy` | scroll + 正文/文件名 LIKE 子串 | ❌ | 找包含某子串的文件或段落、按文件名查找 |
+
+正交过滤参数：
+
+- `--filename PATTERN` — 子串（`design`）或 glob（`*.md`、`*notes*`），匹配文件名 stem 或完整路径
+- `--rerank` / `--no-rerank` — 显式覆盖各模式默认的 rerank 行为
 
 ## 平台支持
 
@@ -109,10 +123,10 @@ hermit kb update my-project --ignore "dist/**" --ignore "*.log"
 hermit kb update my-project --clear-ignore --clear-ignore-ext
 ```
 
-### 4. 语义搜索
+### 4. 搜索
 
 ```sh
-hermit search <collection> "<query>"
+hermit search <collection> [<query>] [--mode ...] [--filename PATTERN] [--top-k N]
 ```
 
 参数：
@@ -120,14 +134,46 @@ hermit search <collection> "<query>"
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `collection` | str | — | Collection 名称 |
-| `query` | str | — | 搜索查询 |
+| `query` | str | "" | 搜索查询；`fuzzy` 模式下若有 `--filename` 则可省略 |
+| `--mode` | str | `hybrid` | `hybrid` / `semantic` / `keyword` / `fuzzy` |
+| `--filename` | str | — | 文件名子串或 glob（`*?[]`），匹配 basename / 完整路径 |
+| `--rerank` | flag | — | 强制开启 cross-encoder 精排（覆盖模式默认） |
+| `--no-rerank` | flag | — | 跳过精排（覆盖模式默认） |
 | `--top-k` | int | 5 | 返回结果数 |
-| `--rerank-candidates` | int | 20 | 精排候选池大小 |
+| `--rerank-candidates` | int | 20 | 精排前的召回候选池大小 |
 
-示例：
+#### 模式选择建议
+
+- 默认场景或没把握时 → `hybrid`
+- 查询是完整自然语言描述、希望命中"意思接近"的内容 → `semantic`
+- 查询是产品名、人名、技术术语、API 名等专有名词 → `keyword`（更快）
+- 想找"哪些文件/段落里出现过 X 子串"、或按文件名查找文件 → `fuzzy`
+
+#### 示例
 
 ```sh
+# 默认混合检索
 hermit search my-notes "如何实现二分查找"
+
+# 纯语义检索（"模糊语义"，去掉 BM25 的精确词限制）
+hermit search my-notes "存储层架构演进" --mode semantic
+
+# 关键词模式（更快，跳过 rerank）
+hermit search my-notes "Qdrant" --mode keyword
+
+# Fuzzy 子串：找所有提到 "二分" 的段落
+hermit search my-notes "二分" --mode fuzzy
+
+# 仅按文件名查找文件（fuzzy 下 query 可省略）
+hermit search my-notes --mode fuzzy --filename design
+
+# 文件名过滤 + 任意模式（正交叠加）
+hermit search my-notes "embedding" --filename "docs/*.md"
+hermit search my-notes "向量数据库" --mode hybrid --filename design
+
+# 显式开/关精排
+hermit search my-notes "Qdrant" --mode keyword --rerank      # 关键词模式也走 rerank
+hermit search my-notes "向量数据库" --no-rerank                # 默认 hybrid 不走 rerank
 ```
 
 ### 5. 其他管理命令
@@ -186,3 +232,11 @@ hermit --pretty search my-notes "query"
 - **推理后端**：fastembed（ONNX Runtime，纯 CPU）
 - **数据目录**：`~/.hermit/`（可通过 `HERMIT_HOME` 环境变量覆盖）
 - **部署模式查询**：`GET /health` 返回 `qdrant_mode`（`"local"` / `"standalone"`）和 `qdrant_host`
+
+## 搜索模式实现细节
+
+- **hybrid**：dense + sparse 各自召回 `rerank_candidates` 个候选 → Qdrant 服务端 RRF 融合 → cross-encoder 精排取 top-k
+- **semantic**：仅 dense 召回 → 精排
+- **keyword**：仅 sparse (BM25) 召回，默认跳过精排（追求速度）。需要时用 `--rerank` 显式启用
+- **fuzzy**：不走任何向量；从 Qdrant scroll 出候选（若指定 `--filename` 则先在数据库侧用 `MatchText` 过滤），再做 Python 端大小写不敏感的 `query in text` 子串匹配。结果按 `(source_file, chunk_index)` 排序后截 top-k。语义是真正的 LIKE 子串（不是 token 关键词），适合"我只记得里面有某个词"。Local 模式下是线性扫，对个人量级 collection 完全够用
+- **filename 过滤**：纯子串走 Qdrant `MatchText`（数据库侧过滤）；含 `*?[` 的 glob 走 Python `fnmatch` 后过滤，可同时匹配 basename 或完整路径

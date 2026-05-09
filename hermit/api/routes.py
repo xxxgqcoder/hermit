@@ -50,6 +50,9 @@ async def do_search(req: SearchRequest):
             w_dense=req.w_dense,
             w_sparse=req.w_sparse,
             rerank_candidates=req.rerank_candidates,
+            mode=req.mode,
+            filename=req.filename,
+            rerank=req.rerank,
         ),
     )
     return SearchResponse(results=[SearchResult(**r) for r in results])

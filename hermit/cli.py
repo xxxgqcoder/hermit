@@ -34,7 +34,9 @@ import urllib.request
 
 from hermit.config import (
     DEFAULT_RERANK_CANDIDATES,
+    DEFAULT_SEARCH_MODE,
     DEFAULT_TOP_K,
+    SEARCH_MODES,
     HERMIT_HOME,
     HOST,
     LOG_DIR,
@@ -325,7 +327,12 @@ def cmd_search(args):
         "collection": args.collection,
         "top_k": args.top_k,
         "rerank_candidates": args.rerank_candidates,
+        "mode": args.mode,
     }
+    if args.filename:
+        body["filename"] = args.filename
+    if args.rerank is not None:
+        body["rerank"] = args.rerank
     result = _api_request("POST", "/search", body)
     _output(result)
 
@@ -554,13 +561,27 @@ def main():
     dl.add_argument("--skip-verify", action="store_true", help="Skip model verification")
 
     # Search
-    sr = sub.add_parser("search", help="Semantic search")
+    sr = sub.add_parser("search", help="Search a collection")
     sr.add_argument("collection", help="Collection name")
-    sr.add_argument("query", help="Search query")
+    sr.add_argument("query", nargs="?", default="",
+                    help="Search query (optional in fuzzy mode when --filename is set)")
     sr.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
                     help=f"Number of results (default: {DEFAULT_TOP_K})")
     sr.add_argument("--rerank-candidates", type=int, default=DEFAULT_RERANK_CANDIDATES,
                     help=f"Rerank candidate pool size (default: {DEFAULT_RERANK_CANDIDATES})")
+    sr.add_argument("--mode", choices=SEARCH_MODES, default=DEFAULT_SEARCH_MODE,
+                    help=("Search mode: hybrid (dense+sparse RRF, default), "
+                          "semantic (dense only), keyword (BM25 sparse only, "
+                          "no rerank), fuzzy (substring on text/filename, "
+                          "no vectors)"))
+    sr.add_argument("--filename", default=None,
+                    help="Filter by filename — substring or glob (*?[]) on the basename / path")
+    rerank_grp = sr.add_mutually_exclusive_group()
+    rerank_grp.add_argument("--rerank", dest="rerank", action="store_const", const=True,
+                            help="Force cross-encoder rerank (override mode default)")
+    rerank_grp.add_argument("--no-rerank", dest="rerank", action="store_const", const=False,
+                            help="Skip cross-encoder rerank (override mode default)")
+    sr.set_defaults(rerank=None)
 
     # kb subcommand
     kb = sub.add_parser("kb", help="Manage knowledge base collections")
