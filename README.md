@@ -125,7 +125,7 @@ QDRANT_HOST=localhost hermit start
 
 Hermit is optimized for stable local search memory usage:
 - **Serialized Search**: Search requests run through a single-worker executor. This keeps the shared ONNX sessions from serving multiple reranker requests concurrently.
-- **Bounded ONNX Inference**: Uses `HERMIT_ONNX_THREADS=4` by default to balance single-request latency with retained ONNX Runtime buffers.
+- **Bounded ONNX Inference**: Uses `HERMIT_ONNX_THREADS=2` by default to keep ONNX Runtime per-thread arenas small. Raise it only after measuring that latency improves enough to justify the extra resident memory.
 - **Smaller Rerank Pool**: Uses 20 candidates per query by default while keeping cross-encoder reranking enabled.
 
 ## Project layout

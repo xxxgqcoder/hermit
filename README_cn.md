@@ -119,7 +119,7 @@ QDRANT_HOST=localhost hermit start
 
 Hermit 针对本地搜索的稳定内存占用进行了优化：
 - **串行搜索请求**：搜索请求通过单 worker executor 串行执行，避免多个 reranker 请求同时占用共享 ONNX session。
-- **限制 ONNX 推理线程**：默认使用 `HERMIT_ONNX_THREADS=4`，在单请求延迟和 ONNX Runtime 保留 buffer 之间取平衡。
+- **限制 ONNX 推理线程**：默认使用 `HERMIT_ONNX_THREADS=2`，避免 ONNX Runtime 每线程 arena 累积带来的常驻内存膨胀；仅在测得单请求延迟收益足够时再调大。
 - **缩小重排候选池**：默认每次查询使用 20 个候选，并保留 Cross-Encoder reranker 精排。
 
 ## 项目结构

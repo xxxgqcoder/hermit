@@ -36,7 +36,7 @@ def test_default_rerank_candidates_reduced_for_memory():
 
 def test_search_request_concurrency_is_not_configurable():
     assert not hasattr(config, "SEARCH_THREADS")
-    assert ONNX_THREADS == 4
+    assert ONNX_THREADS == 2
 
 
 def test_search_keeps_reranker_and_expands_candidate_limit_to_top_k(monkeypatch):

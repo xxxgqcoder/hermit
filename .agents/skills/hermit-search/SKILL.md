@@ -52,10 +52,10 @@ QDRANT_HOST=localhost hermit start
 
 Hermit 的搜索请求在服务端串行执行，不提供 `SEARCH_THREADS` 并发请求配置。这样可以避免多个请求同时占用共享 ONNX session 和 Cross-Encoder reranker，降低本地常驻内存和峰值内存。
 
-单次 ONNX 推理的内部线程数可通过 `HERMIT_ONNX_THREADS` 调整，默认值为 `4`：
+单次 ONNX 推理的内部线程数可通过 `HERMIT_ONNX_THREADS` 调整，默认值为 `2`（ONNX Runtime 每线程会保留独立 arena，调大主要换来内存膨胀，仅在测得延迟收益时再调大）：
 
 ```sh
-HERMIT_ONNX_THREADS=4 hermit start
+HERMIT_ONNX_THREADS=2 hermit start
 ```
 
 ### 3. 添加知识库

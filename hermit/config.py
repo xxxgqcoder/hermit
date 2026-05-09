@@ -30,9 +30,11 @@ DEFAULT_W_SPARSE = 0.3
 DEFAULT_RERANK_CANDIDATES = 20
 
 # ONNX Runtime thread control — intra/inter-op threads per ONNX session.
-# Default to 4 to balance single-request latency with bounded retained buffers.
-# Override with HERMIT_ONNX_THREADS env var.
-ONNX_THREADS: int = int(os.environ.get("HERMIT_ONNX_THREADS", 4))
+# Default to 2: ONNX Runtime retains per-thread arenas, so each extra thread
+# inflates resident memory by tens of MB without proportional latency benefit
+# on the single-worker search executor. Raise via HERMIT_ONNX_THREADS only when
+# you have measured single-request latency and accept the memory cost.
+ONNX_THREADS: int = int(os.environ.get("HERMIT_ONNX_THREADS", 2))
 
 # Embedding models (fastembed-supported)
 DENSE_MODEL = "jinaai/jina-embeddings-v2-base-zh"

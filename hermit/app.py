@@ -85,6 +85,26 @@ async def lifespan(app: FastAPI):
             old_sig, new_sig,
         )
 
+    # Check if the Qdrant deployment mode changed since last run.
+    # The embedded qdrant-client (local) and the Rust qdrant-server
+    # (standalone) use incompatible on-disk layouts, so a switch in
+    # either direction must trigger a full re-index — otherwise the
+    # new engine sees an empty store while Hermit's metadata still
+    # claims N indexed files.
+    from hermit.storage.qdrant_mode_signature import (
+        check_mode_changed, save_mode,
+    )
+    mode_changed, old_mode, new_mode = check_mode_changed(QDRANT_HOST)
+    if mode_changed:
+        logger.warning(
+            "Qdrant deployment mode change detected! Old: %s, New: %s. "
+            "All collections will be re-indexed in background "
+            "(local and standalone engines use incompatible on-disk formats).",
+            old_mode, new_mode,
+        )
+
+    needs_rebuild = model_changed or mode_changed
+
     # Reload persisted collections and run startup scan
     from hermit.storage.registry import get_all
     from hermit.ingestion.scanner import scan_folder, rebuild_collection
@@ -96,9 +116,11 @@ async def lifespan(app: FastAPI):
         ig_pat = cfg.get("ignore_patterns", [])
         ig_ext = cfg.get("ignore_extensions", [])
         try:
-            if model_changed:
+            if needs_rebuild:
+                reason = "model change" if model_changed else f"mode change ({old_mode} → {new_mode})"
                 logger.warning(
-                    "Queuing full re-index for collection '%s' due to model change.", name
+                    "Queuing full re-index for collection '%s' due to %s.",
+                    name, reason,
                 )
                 rebuild_collection(
                     name,
@@ -122,10 +144,13 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed to restore collection '%s'", name)
 
-    # Save current model signature after successful startup
+    # Save current signatures after successful startup
     if model_changed:
         save_signature()
         logger.info("Model signature updated.")
+    if mode_changed:
+        save_mode(new_mode)
+        logger.info("Qdrant mode signature updated to '%s'.", new_mode)
 
     _server_ready = True
     logger.info("Hermit ready.")
