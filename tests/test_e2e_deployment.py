@@ -11,9 +11,9 @@ Run with:
     pytest tests/test_e2e_deployment.py -v -k local        # only local mode
     pytest tests/test_e2e_deployment.py -v -k standalone   # only standalone
 
-Stand-alone tests automatically skip when Docker is unavailable or the
-pinned ``TEST_QDRANT_IMAGE`` is not cached locally — they never pull
-images from the network during a test run.
+A working Docker daemon is REQUIRED — the deployment suite refuses to
+run without it (``pytest.exit`` at module load). The pinned
+``TEST_QDRANT_IMAGE`` is auto-pulled once if not yet cached.
 
 Test groups
 ───────────
@@ -64,38 +64,63 @@ from tests.conftest import (
 TEST_QDRANT_IMAGE = "qdrant/qdrant:v1.17.0"
 
 
-# ── Docker availability helpers ──────────────────────────────────
+# ── Docker requirement ───────────────────────────────────────────
+#
+# Deployment tests REQUIRE a working Docker daemon. The standalone
+# deployment path is not optional coverage — it is a first-class mode
+# of Hermit, so we refuse to skip it when the host is missing Docker.
+# A missing daemon is a setup error, not a CI signal to ignore.
+#
+# The pinned image is auto-pulled once at session start if not cached.
 
 
-def _docker_available() -> bool:
+def _ensure_docker_daemon() -> None:
+    """Abort the test session if Docker is not usable."""
     if not shutil.which("docker"):
-        return False
+        pytest.exit(
+            "Docker CLI not found on PATH. Deployment tests require a "
+            "working Docker daemon — install Docker Desktop (or the "
+            "engine) and retry.",
+            returncode=2,
+        )
     try:
         subprocess.run(
             ["docker", "info"], check=True, capture_output=True, timeout=10,
         )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return True
-
-
-def _qdrant_image_available() -> bool:
-    try:
-        subprocess.run(
-            ["docker", "image", "inspect", TEST_QDRANT_IMAGE],
-            check=True, capture_output=True, timeout=10,
+    except (subprocess.SubprocessError, FileNotFoundError) as exc:
+        pytest.exit(
+            f"Docker daemon is not responding ({exc}). Deployment tests "
+            "require a running Docker daemon — start Docker Desktop "
+            "(or `systemctl start docker`) and retry.",
+            returncode=2,
         )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
-    return True
 
 
-_HAS_DOCKER = _docker_available() and _qdrant_image_available()
-_DOCKER_SKIP_REASON = (
-    f"Docker daemon or local image {TEST_QDRANT_IMAGE} unavailable — "
-    "deployment tests do not pull images from the network"
-)
-requires_docker = pytest.mark.skipif(not _HAS_DOCKER, reason=_DOCKER_SKIP_REASON)
+def _ensure_pinned_image() -> None:
+    """Make sure ``TEST_QDRANT_IMAGE`` is cached locally; pull it if not."""
+    inspect = subprocess.run(
+        ["docker", "image", "inspect", TEST_QDRANT_IMAGE],
+        capture_output=True,
+    )
+    if inspect.returncode == 0:
+        return
+    print(
+        f"\n[deployment-tests] Image '{TEST_QDRANT_IMAGE}' not cached — "
+        "pulling once for the session...",
+        flush=True,
+    )
+    pull = subprocess.run(["docker", "pull", TEST_QDRANT_IMAGE])
+    if pull.returncode != 0:
+        pytest.exit(
+            f"Failed to pull '{TEST_QDRANT_IMAGE}' (exit {pull.returncode}). "
+            "Deployment tests require this image — check network access "
+            "or override QDRANT_IMAGE locally and update TEST_QDRANT_IMAGE.",
+            returncode=2,
+        )
+
+
+_ensure_docker_daemon()
+_ensure_pinned_image()
 
 
 # ── HTTP / process helpers ───────────────────────────────────────
@@ -301,14 +326,11 @@ def _make_standalone_env(
 # ── Mode-parametrized fixtures ───────────────────────────────────
 
 # Both deployment modes are exercised by every parametrized test.
-# Standalone is skipped automatically when Docker is unavailable.
+# Docker availability has already been enforced at module load — neither
+# mode is conditionally skipped.
 _MODE_PARAMS = [
     pytest.param("local", id="local"),
-    pytest.param(
-        "standalone",
-        id="standalone",
-        marks=pytest.mark.skipif(not _HAS_DOCKER, reason=_DOCKER_SKIP_REASON),
-    ),
+    pytest.param("standalone", id="standalone"),
 ]
 
 
@@ -373,15 +395,12 @@ def deployment_server(deployment):
 
 @pytest.fixture()
 def standalone_only_server(tmp_path):
-    """Standalone-only running server. Skipped without Docker.
+    """Standalone-only running server.
 
     Use this in tests that exercise behaviour unique to the Docker-managed
     path (image inspect, container lifecycle, ...). Yields the same shape
     as ``deployment_server`` so tests can read it the same way.
     """
-    if not _HAS_DOCKER:
-        pytest.skip(_DOCKER_SKIP_REASON)
-
     hermit_home = tmp_path / "hermit_home_standalone"
     hermit_home.mkdir()
     _link_models(hermit_home)
@@ -724,7 +743,6 @@ def test_kb_files_all_deleted_then_restart(deployment, test_docs_dir):
 # ────────────────────────────────────────────────────────────────
 
 
-@requires_docker
 def test_switch_local_to_standalone_preserves_data(tmp_path, test_docs_dir):
     """Index in Local mode, stop, switch the same HERMIT_HOME to Stand-alone.
 
@@ -800,7 +818,6 @@ def test_switch_local_to_standalone_preserves_data(tmp_path, test_docs_dir):
 # ────────────────────────────────────────────────────────────────
 
 
-@requires_docker
 def test_standalone_starts_with_localhost(tmp_path):
     """``QDRANT_HOST=localhost`` works (IPv6 resolution regression — Issue #1)."""
     hermit_home = tmp_path / "hermit_localhost"
@@ -839,7 +856,6 @@ def test_standalone_container_is_running_and_pinned(standalone_only_server):
     )
 
 
-@requires_docker
 def test_standalone_atexit_stops_container(tmp_path):
     """``hermit stop`` triggers ``docker stop`` on the managed container.
 
@@ -875,7 +891,6 @@ def test_standalone_atexit_stops_container(tmp_path):
         _remove_container(container_name)
 
 
-@requires_docker
 def test_standalone_orphan_container_adopted(tmp_path):
     """SIGKILL leaves the container running; the next start adopts it.
 
@@ -916,7 +931,6 @@ def test_standalone_orphan_container_adopted(tmp_path):
         _remove_container(container_name)
 
 
-@requires_docker
 def test_standalone_bad_image_fails_fast(tmp_path):
     """A non-existent Qdrant image yields a friendly error and a non-ready server.
 
@@ -972,7 +986,6 @@ def test_standalone_bad_image_fails_fast(tmp_path):
         _remove_container(container_name)
 
 
-@requires_docker
 def test_standalone_no_docker_cli_fails_fast(tmp_path):
     """If the ``docker`` CLI is missing from PATH, hermit aborts standalone start.
 
