@@ -105,7 +105,7 @@
 使用 Qdrant 原生的 **Reciprocal Rank Fusion (RRF)**：
 
 1. 使用 Qdrant `prefetch` + `query` API 进行双路召回
-2. Dense prefetch 和 Sparse prefetch 各取 Top-N 候选（N = rerank_candidates，默认 50）
+2. Dense prefetch 和 Sparse prefetch 各取 Top-N 候选（N = rerank_candidates，默认 20）
 3. Qdrant 服务端执行 RRF 融合，合并去重
 4. 融合后取 Top-N 候选送入 Reranker
 

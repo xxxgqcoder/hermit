@@ -13,7 +13,6 @@ Issue regressions covered:
 import json
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -24,12 +23,50 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _poll_health, _read_port_file, PROJECT_ROOT
+from hermit.config import QDRANT_IMAGE
+from tests.conftest import (
+    _link_models,
+    _poll_health,
+    _poll_health_while_process_alive,
+    _read_port_file,
+    _terminate_hermit_server,
+)
+
+
+def _docker_available() -> bool:
+    if not shutil.which("docker"):
+        return False
+    try:
+        subprocess.run(
+            ["docker", "info"],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return False
+    return True
+
+
+def _qdrant_image_available() -> bool:
+    try:
+        subprocess.run(
+            ["docker", "image", "inspect", QDRANT_IMAGE],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return False
+    return True
 
 # Skip entire module if Docker is not available
 pytestmark = pytest.mark.skipif(
-    not shutil.which("docker"),
-    reason="Docker CLI not found — standalone tests require Docker",
+    not (_docker_available() and _qdrant_image_available()),
+    reason=(
+        f"Docker daemon or local {QDRANT_IMAGE} image unavailable — "
+        "standalone tests do not pull images from the network"
+    ),
 )
 
 
@@ -105,10 +142,7 @@ def standalone_env(tmp_path_factory):
     """
     hermit_home = tmp_path_factory.mktemp("hermit_standalone")
 
-    # Symlink models
-    models_src = PROJECT_ROOT / "models"
-    if models_src.exists():
-        (hermit_home / "models").symlink_to(models_src)
+    _link_models(hermit_home)
 
     qdrant_port = _free_port()
     qdrant_grpc_port = _free_port()
@@ -157,12 +191,14 @@ def standalone_server(standalone_env):
     except RuntimeError:
         proc.kill()
         proc.wait()
+        _terminate_hermit_server(hermit_home)
         pytest.fail("Timed out waiting for port.json")
 
     start_timeout = int(env.get("HERMIT_START_TIMEOUT", 300))
-    if not _poll_health(port, timeout=start_timeout):
+    if not _poll_health_while_process_alive(port, proc, timeout=start_timeout):
         proc.kill()
         proc.wait()
+        _terminate_hermit_server(hermit_home)
         log_file = hermit_home / "logs" / "hermit.log"
         if log_file.exists():
             print("\n=== hermit.log ===\n", log_file.read_text()[-4000:])
@@ -189,6 +225,7 @@ def standalone_server(standalone_env):
 
     # Fallback: force-remove the container
     _remove_container(standalone_env["container_name"])
+    _terminate_hermit_server(hermit_home)
 
     # Ensure process is reaped
     try:
@@ -222,9 +259,7 @@ def test_standalone_server_starts_localhost(tmp_path_factory, standalone_env):
     """
     hermit_home = tmp_path_factory.mktemp("hermit_localhost")
 
-    models_src = PROJECT_ROOT / "models"
-    if models_src.exists():
-        (hermit_home / "models").symlink_to(models_src)
+    _link_models(hermit_home)
 
     qdrant_port = _free_port()
     qdrant_grpc_port = _free_port()
@@ -250,7 +285,7 @@ def test_standalone_server_starts_localhost(tmp_path_factory, standalone_env):
 
     try:
         port = _read_port_file(hermit_home, timeout=10)
-        assert _poll_health(port, timeout=300), (
+        assert _poll_health_while_process_alive(port, proc, timeout=300), (
             "Server with QDRANT_HOST=localhost did not become ready — "
             "possible IPv6 regression (Issue #1)"
         )
@@ -262,6 +297,7 @@ def test_standalone_server_starts_localhost(tmp_path_factory, standalone_env):
             env=env, check=False, capture_output=True,
         )
         _remove_container(container_name)
+        _terminate_hermit_server(hermit_home)
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -338,6 +374,7 @@ def test_standalone_indexing_and_search(standalone_env, test_docs_dir):
             [sys.executable, "-m", "hermit.cli", "stop"],
             env=env, check=False, capture_output=True,
         )
+        _terminate_hermit_server(hermit_home)
         # Wait for atexit/lifespan to clean up Docker container (up to 10s)
         for _ in range(20):
             time.sleep(0.5)
@@ -367,9 +404,7 @@ def test_standalone_container_stopped_after_stop(standalone_env, tmp_path):
     hermit_home = tmp_path / "hermit_stop_test"
     hermit_home.mkdir()
 
-    models_src = PROJECT_ROOT / "models"
-    if models_src.exists():
-        (hermit_home / "models").symlink_to(models_src)
+    _link_models(hermit_home)
 
     qdrant_port = _free_port()
     qdrant_grpc_port = _free_port()
@@ -395,7 +430,7 @@ def test_standalone_container_stopped_after_stop(standalone_env, tmp_path):
 
     try:
         port = _read_port_file(hermit_home, timeout=10)
-        assert _poll_health(port, timeout=300), "Server did not become ready"
+        assert _poll_health_while_process_alive(port, proc, timeout=300), "Server did not become ready"
 
         # Stop server — atexit should docker stop (not rm) the container
         subprocess.run(
@@ -432,6 +467,7 @@ def test_standalone_container_stopped_after_stop(standalone_env, tmp_path):
         )
     finally:
         _remove_container(container_name)
+        _terminate_hermit_server(hermit_home)
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -449,9 +485,7 @@ def test_standalone_orphan_container_adopted(standalone_env, tmp_path):
     hermit_home = tmp_path / "hermit_orphan_test"
     hermit_home.mkdir()
 
-    models_src = PROJECT_ROOT / "models"
-    if models_src.exists():
-        (hermit_home / "models").symlink_to(models_src)
+    _link_models(hermit_home)
 
     qdrant_port = _free_port()
     qdrant_grpc_port = _free_port()
@@ -477,7 +511,9 @@ def test_standalone_orphan_container_adopted(standalone_env, tmp_path):
     )
     try:
         port1 = _read_port_file(hermit_home, timeout=10)
-        assert _poll_health(port1, timeout=300), "First server did not become ready"
+        assert _poll_health_while_process_alive(port1, proc1, timeout=300), (
+            "First server did not become ready"
+        )
 
         # Simulate crash: SIGKILL the uvicorn server process (not hermit CLI)
         # The CLI already exited; we kill the server process via hermit stop --signal SIGKILL
@@ -527,7 +563,9 @@ def test_standalone_orphan_container_adopted(standalone_env, tmp_path):
     )
     try:
         port2 = _read_port_file(hermit_home, timeout=10)
-        assert _poll_health(port2, timeout=300), "Second server (post-crash) did not become ready"
+        assert _poll_health_while_process_alive(port2, proc2, timeout=300), (
+            "Second server (post-crash) did not become ready"
+        )
 
         health = _get(port2, "/health")
         assert health["status"] == "ready"
@@ -560,6 +598,7 @@ def test_standalone_orphan_container_adopted(standalone_env, tmp_path):
         )
     finally:
         _remove_container(container_name)
+        _terminate_hermit_server(hermit_home)
         try:
             proc2.wait(timeout=5)
         except subprocess.TimeoutExpired:

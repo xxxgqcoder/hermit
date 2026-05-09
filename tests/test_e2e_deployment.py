@@ -16,7 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _poll_health, _read_port_file, PROJECT_ROOT
+from tests.conftest import (
+    _poll_health,
+    _poll_health_while_process_alive,
+    _read_port_file,
+    _terminate_hermit_server,
+)
 
 
 # ── helpers ─────────────────────────────────────────────────────
@@ -79,11 +84,17 @@ def _start_server(hermit_env: dict) -> tuple[int, subprocess.Popen]:
         stdout=sp.PIPE,
         stderr=sp.PIPE,
     )
-    port = _read_port_file(hermit_home, timeout=10)
-    start_timeout = int(env.get("HERMIT_START_TIMEOUT", 120))
-    assert _poll_health(port, timeout=start_timeout), (
-        f"Server did not become ready within {start_timeout}s"
-    )
+    try:
+        port = _read_port_file(hermit_home, timeout=10)
+        start_timeout = int(env.get("HERMIT_START_TIMEOUT", 120))
+        assert _poll_health_while_process_alive(port, proc, timeout=start_timeout), (
+            f"Server did not become ready within {start_timeout}s"
+        )
+    except Exception:
+        proc.kill()
+        proc.wait()
+        _terminate_hermit_server(hermit_home)
+        raise
     return port, proc
 
 
@@ -99,6 +110,7 @@ def _stop_server(hermit_env: dict, proc: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+    _terminate_hermit_server(hermit_env["hermit_home"])
 
 
 # ── Tests ────────────────────────────────────────────────────────

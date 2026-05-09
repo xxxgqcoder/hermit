@@ -153,7 +153,7 @@ def qdrant_docker(tmp_path_factory):
     yield ("localhost", STANDALONE_HTTP_PORT, STANDALONE_GRPC_PORT)
 
     docker_mod.stop_qdrant_container(DOCKER_CONTAINER)
-    docker_mod._container_created = False
+    docker_mod._container_managed = False
 
 
 # ── Local mode tests ─────────────────────────────────────────────
@@ -480,7 +480,7 @@ class TestManagedContainerLifecycle:
             image=DOCKER_IMAGE,
         )
         # Container was re-created successfully
-        assert docker_mod._container_created is True
+        assert docker_mod._container_managed is True
         assert _wait_for_port("localhost", STANDALONE_HTTP_PORT, timeout=5.0)
 
     def test_managed_mode_get_client_registers_atexit(self, monkeypatch, qdrant_docker):
@@ -536,14 +536,13 @@ class TestManagedContainerLifecycle:
             )
 
     def test_stop_is_noop_if_not_created(self):
-        """stop_qdrant_container() is a no-op when _container_created is False."""
+        """stop_qdrant_container() is a no-op when _container_managed is False."""
         import hermit.storage.qdrant_docker as docker_mod
 
-        original = docker_mod._container_created
+        original = docker_mod._container_managed
         try:
-            docker_mod._container_created = False
+            docker_mod._container_managed = False
             # Should not invoke docker; no assertion needed beyond no exception
             docker_mod.stop_qdrant_container("ghost_container")
         finally:
-            docker_mod._container_created = original
-
+            docker_mod._container_managed = original

@@ -90,7 +90,7 @@ See [docs/markdown-chunking.md](docs/markdown-chunking.md) for the full design.
 - Search `top_k`: `5`
 - Default `w_dense`: `0.7`
 - Default `w_sparse`: `0.3`
-- Default rerank candidates: `50`
+- Default rerank candidates: `20`
 - Max collections: `4`
 - Max collection name length: `64`
 - Default port: `8000`
@@ -124,9 +124,10 @@ QDRANT_HOST=localhost hermit start
 ## Performance & Concurrency
 
 Hermit is optimized for high-concurrency search environments (e.g., as a backend for multiple agents):
-- **Parallel Reranking**: Utilizes `SEARCH_THREADS` (default: `min(4, cpu_count // 2)`) to perform multiple cross-encoder inferences simultaneously.
+- **Parallel Reranking**: Utilizes `SEARCH_THREADS` (default: `2`) to perform multiple cross-encoder inferences simultaneously.
 - **GIL Bypass**: Since the core inference is handled by ONNX Runtime's C++ library, search requests are truly parallel even within a single Python process.
-- **Improved Throughput**: Validated throughput of ~1.0 queries per second (with 50 candidates per query) on Apple M4 Pro hardware.
+- **Improved Throughput**: Validated throughput of ~1.0 queries per second (with 20 candidates per query) on Apple M4 Pro hardware.
+- **Memory-aware defaults**: Uses `SEARCH_THREADS=2` and `HERMIT_ONNX_THREADS=2` by default to keep shared ONNX session concurrency and retained per-thread buffers bounded.
 
 ## Project layout
 
