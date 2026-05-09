@@ -127,6 +127,7 @@ Hermit is optimized for stable local search memory usage:
 - **Serialized Search**: Search requests run through a single-worker executor. This keeps the shared ONNX sessions from serving multiple reranker requests concurrently.
 - **Bounded ONNX Inference**: Uses `HERMIT_ONNX_THREADS=2` by default to keep ONNX Runtime per-thread arenas small. Raise it only after measuring that latency improves enough to justify the extra resident memory.
 - **Smaller Rerank Pool**: Uses 20 candidates per query by default while keeping cross-encoder reranking enabled.
+- **Embedding Cache**: Indexing skips ONNX inference for chunks whose exact model input was seen before. Vectors are cached on disk (`HERMIT_HOME/cache`, sha256-keyed by `model_name::input_text`) with a 7-day TTL. Cache hits validate the vector dimension and fall back to a fresh embed on mismatch — model upgrades or partially-corrupted entries are self-healing. Always on by design; the cache is bounded and self-reaping.
 
 ## Project layout
 
@@ -421,6 +422,7 @@ By default, Hermit stores its runtime data inside the project directory:
 - `data/qdrant/`: Qdrant embedded data
 - `data/metadata/`: one SQLite database per collection
 - `data/collections.json`: persisted collection configuration
+- `cache/dense/` and `cache/sparse/`: embedding cache (sha256-keyed, 7-day TTL)
 
 That makes the project easy to back up, move, and clean up. No mysterious hidden cave system under your home directory.
 

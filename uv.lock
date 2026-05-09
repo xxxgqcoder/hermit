@@ -111,6 +111,15 @@ wheels = [
 ]
 
 [[package]]
+name = "diskcache"
+version = "5.6.3"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/3f/21/1c1ffc1a039ddcc459db43cc108658f32c57d271d7289a2794e401d0fdb6/diskcache-5.6.3.tar.gz", hash = "sha256:2c3a3fa2743d8535d832ec61c2054a1641f41775aa7c556758a109941e33e4fc" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/3f/27/4570e78fc0bf5ea0ca45eb1de3818a23787af9b390c0b0a0033a1b8236f9/diskcache-5.6.3-py3-none-any.whl", hash = "sha256:5e31b2d5fbad117cc363ebaf6b689474db18a1f6438bc82358b024abd4c2ca19" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.135.1"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
@@ -231,6 +240,7 @@ name = "hermit"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "diskcache" },
     { name = "fastapi" },
     { name = "fastembed" },
     { name = "huggingface-hub" },
@@ -246,6 +256,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "diskcache", specifier = ">=5.6" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fastembed", specifier = ">=0.6" },
     { name = "huggingface-hub", specifier = ">=0.20" },
