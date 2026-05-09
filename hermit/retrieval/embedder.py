@@ -7,6 +7,7 @@ from queue import Queue, Empty
 from fastembed import TextEmbedding, SparseTextEmbedding
 
 from hermit.config import MODEL_ROOT, DENSE_MODEL, SPARSE_MODEL, ONNX_THREADS
+from hermit.retrieval import embed_cache
 
 logger = logging.getLogger(__name__)
 
@@ -166,15 +167,42 @@ _sparse_scheduler = _EmbedScheduler("sparse", _sparse_embed_fn)
 # ── Public API (index path — batched) ──────────────────────────
 
 def embed_dense(texts: list[str]) -> list[list[float]]:
-    """Submit texts for dense embedding. Blocks until the batch is processed."""
+    """Submit texts for dense embedding. Blocks until the batch is processed.
+
+    Pure cache hits skip the scheduler queue and ONNX path entirely; misses
+    still flow through the scheduler so batching across workers is preserved.
+    """
+    cached, miss_idx = embed_cache.lookup_dense(texts)
+    if not miss_idx:
+        return cached  # type: ignore[return-value]
+    miss_texts = [texts[i] for i in miss_idx]
     _dense_scheduler.start()
-    return _dense_scheduler.submit(texts).result()
+    fresh = _dense_scheduler.submit(miss_texts).result()
+    for slot, vec in zip(miss_idx, fresh):
+        cached[slot] = vec
+        embed_cache.store_dense(texts[slot], vec)
+    return cached  # type: ignore[return-value]
 
 
 def embed_sparse(texts: list[str]) -> list:
     """Submit texts for sparse embedding. Blocks until the batch is processed."""
+    cached, miss_idx = embed_cache.lookup_sparse(texts)
+    if not miss_idx:
+        return cached
+    miss_texts = [texts[i] for i in miss_idx]
     _sparse_scheduler.start()
-    return _sparse_scheduler.submit(texts).result()
+    fresh = _sparse_scheduler.submit(miss_texts).result()
+    for slot, sv in zip(miss_idx, fresh):
+        cached[slot] = sv
+        # Persist as plain Python lists (numpy arrays don't survive
+        # diskcache's pickle roundtrip cleanly across versions).
+        try:
+            indices = sv.indices.tolist()
+            values = sv.values.tolist()
+        except AttributeError:  # pragma: no cover — fastembed shape changed
+            continue
+        embed_cache.store_sparse(texts[slot], indices, values)
+    return cached
 
 
 # ── Public API (query path — immediate, no batching) ───────────

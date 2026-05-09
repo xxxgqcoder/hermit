@@ -121,6 +121,7 @@ Hermit 针对本地搜索的稳定内存占用进行了优化：
 - **串行搜索请求**：搜索请求通过单 worker executor 串行执行，避免多个 reranker 请求同时占用共享 ONNX session。
 - **限制 ONNX 推理线程**：默认使用 `HERMIT_ONNX_THREADS=2`，避免 ONNX Runtime 每线程 arena 累积带来的常驻内存膨胀；仅在测得单请求延迟收益足够时再调大。
 - **缩小重排候选池**：默认每次查询使用 20 个候选，并保留 Cross-Encoder reranker 精排。
+- **嵌入缓存**：索引时若某个 chunk 的模型输入文本之前已经算过（sha256 keyed by `model_name::input_text`），直接复用磁盘缓存里的向量，跳过 ONNX 推理。缓存路径 `HERMIT_HOME/cache`，TTL 7 天硬编码；命中时校验向量维度，不合法当未命中处理（模型升级 / 旧脏数据自愈）。设计上默认开启、不提供关闭开关。
 
 ## 项目结构
 
@@ -415,6 +416,7 @@ curl http://127.0.0.1:8000/health
 - `data/qdrant/`: Qdrant embedded 数据
 - `data/metadata/`: 每个 collection 一个 SQLite 数据库
 - `data/collections.json`: collection 持久化配置
+- `cache/dense/` 与 `cache/sparse/`: 嵌入向量缓存（sha256 keyed，TTL 7 天）
 
 因此它很容易备份、迁移和清理，不会悄悄在用户目录里挖地道。
 

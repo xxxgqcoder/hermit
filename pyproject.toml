@@ -15,6 +15,7 @@ dependencies = [
     "fastembed>=0.6",
     "huggingface_hub>=0.20",
     "onnx>=1.21.0",
+    "diskcache>=5.6",
 ]
 
 [project.scripts]
