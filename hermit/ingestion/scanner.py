@@ -97,10 +97,14 @@ def _index_file(
     sparse_vectors = embedder.embed_sparse(embed_inputs)
 
     ids = [str(uuid.uuid4()) for _ in chunks]
+    # `title` keeps the original case for embedding prefix; `filename` is the
+    # lowercase stem indexed for substring search via Qdrant TEXT MatchText.
+    filename_token = title.lower()
     payloads = [
         {
             "text": chunk,
             "title": title,
+            "filename": filename_token,
             "source_file": fpath_str,
             "chunk_index": i,
             "total_chunks": len(chunks),
