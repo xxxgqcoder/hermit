@@ -52,15 +52,31 @@ hermit download
 
 ### 1. 启动服务
 
-```sh
-# 默认启动 (本地 Local 模式)
-hermit start
+**推荐：Stand-alone 模式启动**（Hermit 自动管理 Qdrant Docker 容器）
 
-# 以独立模式启动 (Qdrant Standalone Docker)
+```sh
 QDRANT_HOST=localhost hermit start
 ```
 
+Stand-alone 模式相对 Local（embedded）模式的优势：
+
+- payload 索引（`text` / `filename` / `source_file`）真正生效，`fuzzy` 模式可在 server 端用 TEXT 索引粗筛，大库下显著更快
+- 无需进程级文件锁，多个客户端并发安全
+- 不会因为 Local 模式 numpy 写入竞争而损坏索引
+
+前提条件：本机装有 Docker。Hermit 启动时会自动 `docker run` 一个 `qdrant/qdrant:v1.17.0` 容器（命名 `hermit_qdrant`），进程退出时自动清理。
+
+**Local（embedded）模式**（无 Docker 时的回退）
+
+```sh
+hermit start
+```
+
+适用场景：临时试用、CI 环境、Docker 不可用。注意：payload 索引是 no-op（fuzzy 在大库下会全表扫），且单进程独占数据目录。
+
 输出示例：`{"status": "started", "pid": 12345, "port": 8000}`
+
+通过 `GET /health`（或 `hermit status`）的 `qdrant_mode` 字段可以确认当前部署模式。
 
 ### 2. 搜索内存策略
 
@@ -228,7 +244,7 @@ hermit --pretty search my-notes "query"
 - **Embedding 模型**：jinaai/jina-embeddings-v2-base-zh（768 维）
 - **Sparse 模型**：Qdrant/bm25
 - **Reranker**：jinaai/jina-reranker-v2-base-multilingual
-- **向量数据库**：Qdrant（本地嵌入式模式 或 Standalone Docker 模式）
+- **向量数据库**：Qdrant（推荐 Stand-alone Docker 模式；Local embedded 模式仅作回退）
 - **推理后端**：fastembed（ONNX Runtime，纯 CPU）
 - **数据目录**：`~/.hermit/`（可通过 `HERMIT_HOME` 环境变量覆盖）
 - **部署模式查询**：`GET /health` 返回 `qdrant_mode`（`"local"` / `"standalone"`）和 `qdrant_host`
