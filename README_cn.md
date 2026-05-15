@@ -129,35 +129,50 @@ Hermit 针对本地搜索的稳定内存占用进行了优化：
 .
 ├── main.py
 ├── pyproject.toml
-├── README.md
-├── README_cn.md
+├── README.md / README_cn.md
 ├── docs/
-│   └── design.md
+│   ├── design.md
+│   ├── markdown-chunking.md
+│   ├── qdrant_standalone.md
+│   └── skill-distribution.md
 ├── hermit/
-│   ├── cli.py
-│   ├── config.py
+│   ├── app.py                 # FastAPI 应用 + lifespan
+│   ├── cli.py                 # CLI 入口（JSON 输出）
+│   ├── config.py              # 路径、默认值、环境变量
+│   ├── models.py              # 模型下载与校验
 │   ├── api/
 │   │   ├── routes.py
 │   │   └── schemas.py
 │   ├── ingestion/
-│   │   ├── chunker.py
+│   │   ├── chunker.py         # markdown / token 切片
 │   │   ├── scanner.py
 │   │   ├── task_queue.py
 │   │   └── watcher.py
 │   ├── retrieval/
 │   │   ├── embedder.py
+│   │   ├── embed_cache.py     # diskcache 落地的 per-model 向量缓存
 │   │   ├── reranker.py
 │   │   └── searcher.py
 │   └── storage/
-│       ├── metadata.py
+│       ├── metadata.py        # 每 collection 一个 SQLite
 │       ├── model_signature.py
 │       ├── qdrant.py
+│       ├── qdrant_docker.py   # Stand-alone Docker 容器生命周期
+│       ├── qdrant_mode_signature.py
+│       ├── quantizer.py       # dense embedder 的 INT8 量化
 │       └── registry.py
+└── tests/
+
+~/.hermit/                     # 运行时数据（可用 HERMIT_HOME 覆盖）
+├── models/                    # ONNX 权重（fastembed cache）
+├── cache/{dense,sparse}/      # 嵌入向量缓存（sha256 key，TTL 7 天）
 ├── data/
-│   ├── collections.json
-│   ├── metadata/
-│   └── qdrant/
-└── models/
+│   ├── qdrant/                # Qdrant 数据（local 和 standalone 共用同一份）
+│   ├── metadata/              # 每 collection 一个 SQLite
+│   ├── collections.json       # 注册表
+│   └── model_signature.json
+├── logs/hermit.log
+└── hermit.pid
 ```
 
 ## 安装
@@ -206,10 +221,25 @@ hermit download --skip-verify
 hermit kb add my_docs ./documents
 ```
 
+可选参数：
+
+```bash
+hermit kb add my_docs ./documents \
+  --ignore "build/**" --ignore "*.tmp" \
+  --ignore-ext .pdf --ignore-ext .png
+```
+
 查看 collection 列表：
 
 ```bash
 hermit kb list
+```
+
+更新忽略规则：
+
+```bash
+hermit kb update my_docs --ignore "dist/**" --ignore-ext .log
+hermit kb update my_docs --clear-ignore --clear-ignore-ext
 ```
 
 删除 collection：
@@ -227,14 +257,15 @@ collection 名称规则：
 ### 3. 启动服务
 
 ```bash
-python main.py
+hermit start                          # local 模式（嵌入式 Qdrant）
+QDRANT_HOST=localhost hermit start    # stand-alone 模式（Qdrant Docker，推荐）
 ```
 
 启动时，Hermit 会：
 
 - 预热 embedding 和 reranker 模型
 - 启动后台索引 worker
-- 从 `data/collections.json` 恢复已持久化的 collection
+- 从 `~/.hermit/data/collections.json` 恢复已持久化的 collection
 - 扫描每个 collection 目录
 - 启动目录监听
 
@@ -243,7 +274,27 @@ python main.py
 - Host: `0.0.0.0`
 - Port: `8000`
 
+其他服务命令：
+
+```bash
+hermit status     # 健康 JSON（模式、collection、待索引任务等）
+hermit logs       # 流式查看服务日志
+hermit stop       # 优雅停服
+```
+
 ### 4. 搜索
+
+推荐用 CLI（JSON 输出，免去 curl 拼装）：
+
+```bash
+hermit search my_docs "two sum 的思路"
+hermit search my_docs "Qdrant" --mode keyword          # BM25 only，更快
+hermit search my_docs "二分"   --mode fuzzy             # 子串扫描
+hermit search my_docs "design" --mode fuzzy --filename "*.md"
+hermit search my_docs "embedding" --no-rerank --top-k 3
+```
+
+HTTP 等价调用：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/search \
@@ -252,52 +303,90 @@ curl -X POST http://127.0.0.1:8000/search \
 		"query": "two sum 的思路",
 		"collection": "my_docs",
 		"top_k": 5,
-		"w_dense": 0.7,
-		"w_sparse": 0.3,
-		"rerank_candidates": 30
+		"rerank_candidates": 20,
+		"mode": "hybrid"
 	}'
 ```
 
+`mode` 取值：`hybrid`（默认）、`semantic`、`keyword`、`fuzzy`。
+
 ## CLI
 
-Hermit 当前提供以下命令。
+所有命令默认输出 JSON 到 stdout。加 `--pretty` 可得到缩进格式。错误以 `{"error": "message"}` 形式输出，退出码非零。
+
+### 服务生命周期
+
+| 命令 | 用途 |
+|---|---|
+| `hermit start` | 后台启动服务（uvicorn daemon）。设置 `QDRANT_HOST=localhost` 进 stand-alone 模式。 |
+| `hermit stop` | 优雅停止（SIGTERM，10 秒后退化为 SIGKILL）。 |
+| `hermit status` | 健康 JSON：模式、uptime、collections、待处理任务等。 |
+| `hermit logs` | 流式查看 `~/.hermit/logs/hermit.log`（非 JSON）。 |
 
 ### `hermit download`
 
 下载所有所需模型，并可选执行基础验证。
 
-```bash
-hermit download
-```
+参数：
+
+- `--force`：强制重新下载
+- `--skip-verify`：跳过下载后的验证
+
+### `hermit search <collection> [<query>]`
+
+语义 / 关键词 / 模糊检索，JSON 输出。
 
 参数：
 
-- `--force`: 强制重新下载
-- `--skip-verify`: 跳过下载后的验证
+- `--mode {hybrid,semantic,keyword,fuzzy}` — 默认 `hybrid`
+- `--top-k N` — 返回数量（默认 5）
+- `--rerank-candidates N` — 精排前的召回候选池大小（默认 20）
+- `--filename PATTERN` — 文件名过滤（子串或 glob），正交参数
+- `--rerank` / `--no-rerank` — 显式覆盖各模式默认的 rerank 行为
+
+`fuzzy` 模式下，当 `--filename` 给出时，`query` 可省略。
 
 ### `hermit kb add <name> <dir>`
 
 将目录注册为 collection。
 
-```bash
-hermit kb add notes ./documents
-```
+参数：
+
+- `--ignore PATTERN` — glob 形式路径忽略（可重复）
+- `--ignore-ext EXT` — 后缀忽略，例如 `.pdf`（可重复）
+
+### `hermit kb update <name>`
+
+替换某个 collection 的忽略规则（替换语义，非追加）。
+
+参数：
+
+- `--ignore PATTERN` — 新的路径忽略列表（替换已有配置）
+- `--ignore-ext EXT` — 新的后缀忽略列表（替换已有配置）
+- `--clear-ignore` — 清空所有路径忽略模式
+- `--clear-ignore-ext` — 清空所有后缀忽略规则
 
 ### `hermit kb remove <name>`
 
 删除 collection 及其元数据。
 
-```bash
-hermit kb remove notes
-```
-
 ### `hermit kb list`
 
 列出所有已注册 collection。
 
-```bash
-hermit kb list
-```
+### `hermit collection <subcommand> <name>`
+
+查询正在运行的服务的实时 collection 状态（需要 `hermit start` 已经启动）。
+
+- `hermit collection status <name>` — 索引状态（`indexed_files` / `total_chunks` / `watching`）
+- `hermit collection sync <name>` — 手动触发同步扫描
+- `hermit collection tasks <name>` — 后台任务队列状态
+
+### `hermit install-skills`
+
+将内置的 agent skill 安装到 `~/.agents/skills/`。
+
+- `--uninstall` 反向卸载已安装的 skill
 
 ## HTTP API
 
@@ -305,7 +394,7 @@ hermit kb list
 
 ### `POST /search`
 
-执行混合语义检索。
+执行混合 / 语义 / 关键词 / 模糊检索。
 
 请求示例：
 
@@ -314,11 +403,14 @@ hermit kb list
 	"query": "滑动窗口最大值",
 	"collection": "my_docs",
 	"top_k": 5,
-	"w_dense": 0.7,
-	"w_sparse": 0.3,
-	"rerank_candidates": 30
+	"rerank_candidates": 20,
+	"mode": "hybrid",
+	"filename": null,
+	"rerank": null
 }
 ```
+
+`mode`：`hybrid`（默认） / `semantic` / `keyword` / `fuzzy`。`filename` 支持子串或 glob（例如 `*.md`）。`rerank` 用来覆盖该模式的默认 rerank 行为（`null` 走模式默认；`false` 跳过；`true` 强制开启）。
 
 返回示例：
 
@@ -336,57 +428,40 @@ hermit kb list
 }
 ```
 
+### `POST /collections`
+
+注册一个新的 collection。服务端异步扫描该目录并持久化到注册表，重启后自动恢复。
+
+请求：
+
+```json
+{
+	"name": "my_docs",
+	"folder_path": "/abs/path/to/docs",
+	"ignore_patterns": ["build/**"],
+	"ignore_extensions": [".pdf"]
+}
+```
+
+冲突时返回 `409`，非法名称 / 路径返回 `400`。
+
+### `DELETE /collections/{name}`
+
+删除 collection：停掉文件监听 → 等后台索引队列清空 → 删 Qdrant collection → 删 SQLite 元数据 → 从注册表移除。
+
+若 30 秒内后台索引任务无法清空，返回 `409`，稍后重试。
+
 ### `POST /collections/{name}/sync`
 
-手动触发某个 collection 的扫描同步。
-
-返回字段：
-
-- `added`
-- `updated`
-- `deleted`
-
-示例：
-
-```bash
-curl -X POST http://127.0.0.1:8000/collections/my_docs/sync
-```
+手动触发某个 collection 的扫描同步。返回 `{ "added": N, "updated": M, "deleted": K }`。
 
 ### `GET /collections/{name}/status`
 
-查看 collection 状态。
-
-返回字段：
-
-- `name`
-- `folder_path`
-- `indexed_files`
-- `total_chunks`
-- `watching`
-
-示例：
-
-```bash
-curl http://127.0.0.1:8000/collections/my_docs/status
-```
+返回 `{ name, folder_path, indexed_files, total_chunks, watching }`。
 
 ### `GET /collections/{name}/tasks`
 
-查看某个 collection 的后台索引任务状态。
-
-返回字段：
-
-- `collection`
-- `pending_tasks`
-- `queued_tasks`
-- `in_progress_tasks`
-- `worker_alive`
-
-示例：
-
-```bash
-curl http://127.0.0.1:8000/collections/my_docs/tasks
-```
+返回 `{ collection, pending_tasks, queued_tasks, in_progress_tasks, worker_alive }`。
 
 ### `GET /health`
 
@@ -402,23 +477,19 @@ curl http://127.0.0.1:8000/collections/my_docs/tasks
 - `qdrant_mode` — `"local"`（嵌入式）或 `"standalone"`（外部 Qdrant 服务）
 - `qdrant_host` — standalone 模式下的 host 地址；local 模式下为 `null`
 
-示例：
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
 ## 数据存储
 
-默认情况下，Hermit 将运行数据保存在项目目录中：
+Hermit 默认把所有运行时数据存到 `~/.hermit/`（可用 `HERMIT_HOME` 环境变量覆盖）：
 
-- `models/`: 本地模型缓存
-- `data/qdrant/`: Qdrant embedded 数据
-- `data/metadata/`: 每个 collection 一个 SQLite 数据库
-- `data/collections.json`: collection 持久化配置
-- `cache/dense/` 与 `cache/sparse/`: 嵌入向量缓存（sha256 keyed，TTL 7 天）
+- `~/.hermit/models/`: 本地模型缓存（fastembed ONNX 权重）
+- `~/.hermit/data/qdrant/`: Qdrant 数据 —— local 与 stand-alone 两种模式共用同一份目录
+- `~/.hermit/data/metadata/`: 每个 collection 一个 SQLite 数据库
+- `~/.hermit/data/collections.json`: collection 持久化配置
+- `~/.hermit/cache/dense/` 与 `~/.hermit/cache/sparse/`: 嵌入向量缓存（sha256 keyed，TTL 7 天）
+- `~/.hermit/logs/hermit.log`: 服务日志
+- `~/.hermit/hermit.pid` 和 `~/.hermit/port.json`: daemon 状态文件
 
-因此它很容易备份、迁移和清理，不会悄悄在用户目录里挖地道。
+集中在单一目录，便于备份、迁移和清理。
 
 ## 索引行为
 
@@ -447,7 +518,6 @@ Hermit 通过 SQLite 跟踪已索引文件，并使用 **SHA256** 检测内容�
 
 ## 已知限制
 
-- 当前 **没有 API** 用于创建或删除 collection；请使用 CLI
 - API 接受 `w_dense` 和 `w_sparse` 参数，但当前实现使用的是 **RRF 融合**，并非显式加权分数融合
 - 所有文件均按文本处理；PDF、图片和 Office 文档解析不在当前范围内
 - collection 数量上限目前是 `4`

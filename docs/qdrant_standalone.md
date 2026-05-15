@@ -23,15 +23,15 @@ Qdrant 官方提供的 Python 客户端（用于 Local Mode）与 Qdrant 服务�
 - **Stand-alone Mode**：Hermit 发现配置（如环境变量 `QDRANT_HOST`）后，通过 HTTP/gRPC 与外部 Qdrant 通信。外部的 Qdrant 以 Docker 运行，并通过 Volumes（`-v`）直接挂载这个同一路径。
 
 ### 2.2 Docker 启动规范
-为了确保数据在容器内外流转正常，启动 Stand-alone Qdrant 容器必须使用规范的形式：
+为了确保数据在容器内外流转正常，启动 Stand-alone Qdrant 容器必须使用规范的形式。**通常无需手动执行这条命令**——当用户设置 `QDRANT_HOST=localhost`（默认就识别为本地）时，Hermit 会自动用等价参数 `docker run` 一个名为 `hermit_qdrant` 的容器（见 `hermit/storage/qdrant_docker.py`），并在进程退出时清理。下面这条命令仅作为参考，用于在没有 Hermit 管理或希望自行配置时使用：
 ```bash
-docker run -d --name qdrant \
+docker run -d --name hermit_qdrant \
   --user $(id -u):$(id -g) \
   -p 6333:6333 -p 6334:6334 \
   -v ~/.hermit/data/qdrant:/qdrant/storage:z \
-  qdrant/qdrant:v1.8.x
+  qdrant/qdrant:v1.17.0
 ```
-*(注：`:z` 用于 SELinux 环境，确保挂载点读写有效。)*
+*(注：`:z` 用于 SELinux 环境，确保挂载点读写有效。镜像版本以 `hermit/config.py` 的 `QDRANT_IMAGE` 为准，需要时用 `QDRANT_IMAGE` 环境变量覆盖。)*
 
 ---
 
@@ -54,16 +54,22 @@ docker run -d --name qdrant \
 ### 3.3 数据格式版本锁定 (Version Mismatch)
 新版本的 Docker 镜像可能涉及引擎的数据结构迁移。如果使用 `latest` 拉取了过新的版本进行了结构升级，之后退回到旧版本的 Python `qdrant-client` Local Mode 时，会无法解析数据。
 **应对策略**：
-- **强对齐版本要求**：始终保证 Docker 镜像的 Tag（如 `v1.8.2`）与 `pyproject.toml` 中的 `qdrant-client` 大小版本严格保持一致。在用户文档中避免使用 `latest` 标签。
+- **强对齐版本要求**：Hermit 在 `hermit/config.py` 中将默认 Docker 镜像锁定为与 `pyproject.toml` 中 `qdrant-client` 兼容的 tag（当前 `qdrant/qdrant:v1.17.0`）。**避免使用 `latest` 标签**；若需自定义镜像版本，请通过 `QDRANT_IMAGE` 环境变量显式指定。
 
 ---
 
-## 4. 后续任务项 (To-Do)
+## 4. 实施状态
 
-1. [ ] **更新配置模块**：在 `hermit/config.py` 解析并引入 `QDRANT_HOST` 和 `QDRANT_PORT` 环境变量和相关默认值。
-2. [ ] **客户端初始化适配**：改造 `hermit/storage/qdrant.py` 的 `get_client()` 方法。
-   - 检测如果有 `QDRANT_HOST` 则通过 `url=` 连接。
-   - 如果没有，则 fallback 到原来的 `path=` 本地模式。
-   - 加入文件锁检测及异常捕获逻辑。
-3. [ ] **并行入库解放**：在监测到处于 Stand-alone 模式时，绕过原有的 `_lock` 全局锁控制，恢复极速的并行多线程入库执行。
-4. [ ] **更新 README**：为高级用户补充使用 Docker 启用高性能并行模式的教程和参数说明。
+本设计在 2026-05 已完整落地：
+
+- [x] **配置模块**：`hermit/config.py` 解析 `QDRANT_HOST`、`QDRANT_PORT`、`QDRANT_GRPC_PORT`、`QDRANT_MANAGED`、`QDRANT_CONTAINER_NAME`、`QDRANT_IMAGE` 等环境变量。
+- [x] **客户端初始化**：`hermit/storage/qdrant.py` 的 `get_client()` 按 `QDRANT_HOST` 是否设置自动分流到 server (`host=/port=`) 或 local (`path=`)；并实现了端口探针 + 应用层 lock + 引擎错误捕获 三重防护。
+- [x] **Docker 容器生命周期**：`hermit/storage/qdrant_docker.py` 在 stand-alone 模式自动 `docker run` 容器（`hermit_qdrant`），并通过 `atexit` 在进程退出时清理。
+- [x] **API/CLI collection 管理**：`POST /collections` / `DELETE /collections/{name}` 已在 `hermit/api/routes.py` 实现；CLI 侧 `hermit kb add/remove/update/list` 已支持，对运行中的服务通过 HTTP 转发，未运行时本地直接操作注册表。
+- [x] **健康检查暴露模式**：`GET /health` 返回 `qdrant_mode`（`"local"` / `"standalone"`）和 `qdrant_host`，参见 `routes.py` 中 `health()` 实现。
+- [x] **README 同步**：README.md / README_cn.md 已补充 stand-alone 启动说明、CLI 完整命令清单、HTTP API 全量端点（含 `POST/DELETE /collections`）。
+
+后续可选改进项（未实施，仅记录）：
+
+- 并行入库解放：当前 stand-alone 模式下索引仍通过 `INDEX_WORKERS`（默认 1）控制；如果实测瓶颈是入库吞吐，可在 stand-alone 下放宽默认值（server 端无 `_lock` 限制，可天然支持高并发）。
+- 容器健康监控：目前依赖 Hermit 进程退出时的 atexit 钩子清理容器；若 Hermit 异常崩溃，容器可能孤立。可以加 `docker --restart=unless-stopped` + Hermit 启动时检测既有容器并 reattach。
