@@ -135,35 +135,50 @@ Hermit is optimized for stable local search memory usage:
 .
 ├── main.py
 ├── pyproject.toml
-├── README.md
-├── README_cn.md
+├── README.md / README_cn.md
 ├── docs/
-│   └── design.md
+│   ├── design.md
+│   ├── markdown-chunking.md
+│   ├── qdrant_standalone.md
+│   └── skill-distribution.md
 ├── hermit/
-│   ├── cli.py
-│   ├── config.py
+│   ├── app.py                 # FastAPI app + lifespan
+│   ├── cli.py                 # CLI entry (JSON output)
+│   ├── config.py              # paths, defaults, env vars
+│   ├── models.py              # model download + verification
 │   ├── api/
 │   │   ├── routes.py
 │   │   └── schemas.py
 │   ├── ingestion/
-│   │   ├── chunker.py
+│   │   ├── chunker.py         # markdown / token chunking
 │   │   ├── scanner.py
 │   │   ├── task_queue.py
 │   │   └── watcher.py
 │   ├── retrieval/
 │   │   ├── embedder.py
+│   │   ├── embed_cache.py     # diskcache-backed per-model embedding cache
 │   │   ├── reranker.py
 │   │   └── searcher.py
 │   └── storage/
-│       ├── metadata.py
+│       ├── metadata.py        # SQLite per-collection
 │       ├── model_signature.py
 │       ├── qdrant.py
+│       ├── qdrant_docker.py   # Stand-alone container lifecycle
+│       ├── qdrant_mode_signature.py
+│       ├── quantizer.py       # INT8 quantization for dense embedder
 │       └── registry.py
+└── tests/
+
+~/.hermit/                     # runtime data (override with HERMIT_HOME)
+├── models/                    # ONNX weights (fastembed cache)
+├── cache/{dense,sparse}/      # embedding cache (sha256-keyed, 7-day TTL)
 ├── data/
-│   ├── collections.json
-│   ├── metadata/
-│   └── qdrant/
-└── models/
+│   ├── qdrant/                # Qdrant storage (shared between local / standalone)
+│   ├── metadata/              # SQLite per-collection
+│   ├── collections.json       # registry
+│   └── model_signature.json
+├── logs/hermit.log
+└── hermit.pid
 ```
 
 ## Installation
@@ -212,10 +227,25 @@ Notes:
 hermit kb add my_docs ./documents
 ```
 
+Optional flags:
+
+```bash
+hermit kb add my_docs ./documents \
+  --ignore "build/**" --ignore "*.tmp" \
+  --ignore-ext .pdf --ignore-ext .png
+```
+
 List collections:
 
 ```bash
 hermit kb list
+```
+
+Update ignore rules:
+
+```bash
+hermit kb update my_docs --ignore "dist/**" --ignore-ext .log
+hermit kb update my_docs --clear-ignore --clear-ignore-ext
 ```
 
 Remove a collection:
@@ -233,14 +263,15 @@ Collection naming rules:
 ### 3. Start the service
 
 ```bash
-python main.py
+hermit start                          # local (embedded Qdrant)
+QDRANT_HOST=localhost hermit start    # stand-alone (Qdrant Docker, recommended)
 ```
 
 On startup, Hermit will:
 
 - warm up embedding and reranker models
 - start the background indexing worker
-- restore persisted collections from `data/collections.json`
+- restore persisted collections from `~/.hermit/data/collections.json`
 - scan each collection folder
 - start watching registered folders for changes
 
@@ -249,7 +280,27 @@ Default bind address:
 - Host: `0.0.0.0`
 - Port: `8000`
 
+Other server commands:
+
+```bash
+hermit status     # health JSON (mode, collections, pending tasks, ...)
+hermit logs       # tail the server log
+hermit stop       # graceful shutdown
+```
+
 ### 4. Search
+
+CLI (recommended — JSON output, no curl glue needed):
+
+```bash
+hermit search my_docs "two sum approach"
+hermit search my_docs "Qdrant" --mode keyword           # BM25 only, faster
+hermit search my_docs "binary"  --mode fuzzy            # substring scan
+hermit search my_docs "design"  --mode fuzzy --filename "*.md"
+hermit search my_docs "embedding" --no-rerank --top-k 3
+```
+
+HTTP equivalent:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/search \
@@ -258,52 +309,90 @@ curl -X POST http://127.0.0.1:8000/search \
 		"query": "two sum approach",
 		"collection": "my_docs",
 		"top_k": 5,
-		"w_dense": 0.7,
-		"w_sparse": 0.3,
-		"rerank_candidates": 30
+		"rerank_candidates": 20,
+		"mode": "hybrid"
 	}'
 ```
 
+Supported `mode` values: `hybrid` (default), `semantic`, `keyword`, `fuzzy`.
+
 ## CLI
 
-Hermit currently provides these CLI commands.
+All commands output JSON to stdout. Add `--pretty` for indented output. Errors are reported as `{"error": "message"}` with non-zero exit code.
+
+### Server lifecycle
+
+| Command | Purpose |
+|---|---|
+| `hermit start` | Start the server in background (uvicorn daemon). Set `QDRANT_HOST=localhost` to run in stand-alone mode. |
+| `hermit stop` | Graceful shutdown (SIGTERM, falls back to SIGKILL after 10s). |
+| `hermit status` | Health JSON: mode, uptime, collections, pending tasks. |
+| `hermit logs` | Tail `~/.hermit/logs/hermit.log` (streaming, not JSON). |
 
 ### `hermit download`
 
 Download all required models and optionally run a basic verification step.
-
-```bash
-hermit download
-```
 
 Flags:
 
 - `--force`: force re-download
 - `--skip-verify`: skip post-download verification
 
+### `hermit search <collection> [<query>]`
+
+Semantic / keyword / fuzzy search. JSON-formatted results.
+
+Flags:
+
+- `--mode {hybrid,semantic,keyword,fuzzy}` — default `hybrid`
+- `--top-k N` — number of results (default 5)
+- `--rerank-candidates N` — recall pool before rerank (default 20)
+- `--filename PATTERN` — orthogonal filename filter (substring or glob)
+- `--rerank` / `--no-rerank` — override the mode's default rerank behavior
+
+In `fuzzy` mode the `query` is optional when `--filename` is supplied.
+
 ### `hermit kb add <name> <dir>`
 
 Register a folder as a collection.
 
-```bash
-hermit kb add notes ./documents
-```
+Flags:
+
+- `--ignore PATTERN` — glob path to ignore (repeatable)
+- `--ignore-ext EXT` — file extension to ignore, e.g. `.pdf` (repeatable)
+
+### `hermit kb update <name>`
+
+Replace ignore rules for an existing collection (not additive).
+
+Flags:
+
+- `--ignore PATTERN` — new path-ignore list (replaces previous)
+- `--ignore-ext EXT` — new ext-ignore list (replaces previous)
+- `--clear-ignore` — drop all path ignore patterns
+- `--clear-ignore-ext` — drop all extension ignore patterns
 
 ### `hermit kb remove <name>`
 
 Remove a collection and delete its metadata store.
 
-```bash
-hermit kb remove notes
-```
-
 ### `hermit kb list`
 
 List all registered collections.
 
-```bash
-hermit kb list
-```
+### `hermit collection <subcommand> <name>`
+
+Query live collection state from a running server (requires `hermit start`).
+
+- `hermit collection status <name>` — indexing status (`indexed_files`, `total_chunks`, `watching`)
+- `hermit collection sync <name>` — trigger a manual rescan
+- `hermit collection tasks <name>` — background task queue status
+
+### `hermit install-skills`
+
+Install bundled agent skill specs to `~/.agents/skills/`.
+
+- `--uninstall` removes previously installed skills
 
 ## HTTP API
 
@@ -311,7 +400,7 @@ The current codebase exposes the following endpoints.
 
 ### `POST /search`
 
-Run hybrid semantic search.
+Run hybrid / semantic / keyword / fuzzy search.
 
 Request example:
 
@@ -320,11 +409,14 @@ Request example:
 	"query": "sliding window maximum",
 	"collection": "my_docs",
 	"top_k": 5,
-	"w_dense": 0.7,
-	"w_sparse": 0.3,
-	"rerank_candidates": 30
+	"rerank_candidates": 20,
+	"mode": "hybrid",
+	"filename": null,
+	"rerank": null
 }
 ```
+
+`mode`: `hybrid` (default), `semantic`, `keyword`, `fuzzy`. `filename` accepts a substring or glob (e.g. `*.md`). `rerank` overrides the mode's default cross-encoder behavior (`null` keeps the default; `false` skips rerank; `true` forces it).
 
 Response example:
 
@@ -342,57 +434,40 @@ Response example:
 }
 ```
 
+### `POST /collections`
+
+Register a new collection. The server scans the folder asynchronously and persists the entry to the registry; subsequent restarts auto-restore it.
+
+Request:
+
+```json
+{
+	"name": "my_docs",
+	"folder_path": "/abs/path/to/docs",
+	"ignore_patterns": ["build/**"],
+	"ignore_extensions": [".pdf"]
+}
+```
+
+Returns `409` if the name already exists, `400` for invalid name or folder path.
+
+### `DELETE /collections/{name}`
+
+Remove a collection: stop the watcher, drain its task queue, drop the Qdrant collection, delete the SQLite metadata DB, and unregister.
+
+Returns `409` if background indexing tasks for that collection cannot drain within 30s — retry shortly.
+
 ### `POST /collections/{name}/sync`
 
-Trigger a manual scan/sync for a collection.
-
-Response fields:
-
-- `added`
-- `updated`
-- `deleted`
-
-Example:
-
-```bash
-curl -X POST http://127.0.0.1:8000/collections/my_docs/sync
-```
+Trigger a manual scan/sync for an existing collection. Response: `{ "added": N, "updated": M, "deleted": K }`.
 
 ### `GET /collections/{name}/status`
 
-Get collection status.
-
-Response fields:
-
-- `name`
-- `folder_path`
-- `indexed_files`
-- `total_chunks`
-- `watching`
-
-Example:
-
-```bash
-curl http://127.0.0.1:8000/collections/my_docs/status
-```
+Returns `{ name, folder_path, indexed_files, total_chunks, watching }`.
 
 ### `GET /collections/{name}/tasks`
 
-Get background indexing task status for a collection.
-
-Response fields:
-
-- `collection`
-- `pending_tasks`
-- `queued_tasks`
-- `in_progress_tasks`
-- `worker_alive`
-
-Example:
-
-```bash
-curl http://127.0.0.1:8000/collections/my_docs/tasks
-```
+Returns `{ collection, pending_tasks, queued_tasks, in_progress_tasks, worker_alive }`.
 
 ### `GET /health`
 
@@ -408,23 +483,19 @@ Response fields:
 - `qdrant_mode` — `"local"` (embedded) or `"standalone"` (external Qdrant server)
 - `qdrant_host` — host address in standalone mode; `null` in local mode
 
-Example:
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
 ## Storage layout
 
-By default, Hermit stores its runtime data inside the project directory:
+Hermit keeps all runtime data under `~/.hermit/` by default (override with `HERMIT_HOME` env var):
 
-- `models/`: local model cache
-- `data/qdrant/`: Qdrant embedded data
-- `data/metadata/`: one SQLite database per collection
-- `data/collections.json`: persisted collection configuration
-- `cache/dense/` and `cache/sparse/`: embedding cache (sha256-keyed, 7-day TTL)
+- `~/.hermit/models/`: local model cache (fastembed ONNX weights)
+- `~/.hermit/data/qdrant/`: Qdrant storage — same path is used by both local and stand-alone modes
+- `~/.hermit/data/metadata/`: one SQLite database per collection
+- `~/.hermit/data/collections.json`: persisted collection configuration
+- `~/.hermit/cache/dense/` and `~/.hermit/cache/sparse/`: embedding cache (sha256-keyed, 7-day TTL)
+- `~/.hermit/logs/hermit.log`: server log
+- `~/.hermit/hermit.pid` and `~/.hermit/port.json`: daemon bookkeeping
 
-That makes the project easy to back up, move, and clean up. No mysterious hidden cave system under your home directory.
+Single directory makes Hermit easy to back up, move, and clean up.
 
 ## Indexing behavior
 
@@ -453,7 +524,6 @@ During scanning it handles:
 
 ## Known limitations
 
-- there is currently **no API** to create or delete collections; use the CLI for that
 - `w_dense` and `w_sparse` are accepted by the API, but the current implementation uses **RRF fusion** rather than explicit weighted score fusion
 - all files are treated as text; PDF, image, and Office parsing are out of scope
 - the maximum number of collections is currently `4`

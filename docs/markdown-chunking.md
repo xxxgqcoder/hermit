@@ -38,6 +38,8 @@
 
 ### 设计要点
 
+**`---` 的消岐**：解析器先检查 Horizontal rule（优先级 7）再检查 Setext heading（优先级 10），但 Setext heading 的判定是"当前文本行 + 下一行的 `===`/`---` 下划线"，所以扫到文本行时会先发现 setext，把 `---` 当作下划线消费；只有**单独出现**（前面是空行或紧跟在特殊块之后）的 `---` 才会落到 Horizontal rule 分支。这跟 CommonMark 的常见做法一致。
+
 **List 合并**：整个列表（包括多级嵌套子项）作为一个 block，避免将逻辑相关的列举项分散到不同 chunk。跨空行的列表延续（`  ` 缩进后续）也会被并入同一 block。
 
 **支持 Unicode 项目符号**：`_LIST_RE` 覆盖 `•·–—▪▸◦` 等常见 Unicode 符号，确保从 PDF 转换的 Markdown 中使用非标准 bullet 的列表也能正确识别。

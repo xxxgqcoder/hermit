@@ -73,7 +73,11 @@
 
 ## 存储 Schema（Qdrant）
 
-每个知识库 = 1 个 collection，使用 **named vectors**。Qdrant 运行在嵌入式模式（embedded），数据存储在 `~/.hermit/data/qdrant/`。
+每个知识库 = 1 个 collection，使用 **named vectors**。Qdrant 支持两种部署模式：
+- **Local 模式（默认）**：`QdrantClient(path=...)`，引擎运行在 Hermit 主进程内
+- **Stand-alone 模式**：`QDRANT_HOST=localhost`，Hermit 自动管理一个 `qdrant/qdrant:v1.17.0` Docker 容器（详见 `docs/qdrant_standalone.md`）
+
+两种模式共用同一份磁盘数据（`~/.hermit/data/qdrant/`），可以无缝切换。
 
 ### 向量配置
 
@@ -170,7 +174,7 @@ API 中 `w_dense`/`w_sparse` 参数保留，当前未使用。
 
 ## 服务层（FastAPI）
 
-单进程，模型启动时预加载。`app.py` 使用 `asynccontextmanager` lifespan 管理启动/关闭。知识库管理（注册、删除、更新）通过 CLI 完成，不暴露写操作 HTTP 端点。
+单进程，模型启动时预加载。`app.py` 使用 `asynccontextmanager` lifespan 管理启动/关闭。知识库管理（注册、删除、更新忽略规则）既可以通过 CLI（`hermit kb add/remove/update`），也可以通过 HTTP（`POST /collections` / `DELETE /collections/{name}`）。CLI 在服务运行时会优先转发到 HTTP API；服务未运行时直接操作本地注册表。
 
 ### 检索流程
 
@@ -210,38 +214,49 @@ hermit/
 ├── pyproject.toml
 ├── hermit/
 │   ├── app.py                 # FastAPI 应用 + lifespan（模型预加载、collection 恢复）
-│   ├── cli.py                 # CLI 入口（hermit start/stop/kb/search/...）
+│   ├── cli.py                 # CLI 入口（hermit start/stop/kb/search/collection/...）
 │   ├── config.py              # 配置管理（HERMIT_HOME、MODEL_ROOT、DATA_ROOT、模型名、默认参数）
 │   ├── models.py              # 模型下载与校验（huggingface_hub）
 │   ├── ingestion/
 │   │   ├── scanner.py         # 文件夹扫描 + 变更检测 + 索引
 │   │   ├── watcher.py         # watchdog 实时监听（2s 防抖）
-│   │   ├── chunker.py         # token 级文本切片 + overlap
+│   │   ├── chunker.py         # token 级文本切片 + markdown 语义切片
 │   │   └── task_queue.py      # 后台索引任务队列（线程池）
 │   ├── retrieval/
 │   │   ├── embedder.py        # Dense (TextEmbedding) + Sparse (SparseTextEmbedding)
+│   │   ├── embed_cache.py     # diskcache 落地的 per-model 嵌入缓存（sha256 keyed）
 │   │   ├── searcher.py        # Qdrant prefetch + RRF 融合 + rerank
 │   │   └── reranker.py        # TextCrossEncoder
 │   ├── storage/
-│   │   ├── qdrant.py          # Qdrant 嵌入式客户端 + collection 管理
+│   │   ├── qdrant.py          # Qdrant 客户端（local / stand-alone 自适应）+ collection 管理
+│   │   ├── qdrant_docker.py   # Stand-alone Docker 容器生命周期
+│   │   ├── qdrant_mode_signature.py  # 检测 local↔standalone 切换时的兼容性
+│   │   ├── quantizer.py       # dense embedder 的 INT8 量化加载
 │   │   ├── metadata.py        # SQLite 元数据管理
 │   │   ├── registry.py        # 知识库注册表（~/.hermit/data/collections.json）
 │   │   └── model_signature.py # 模型变更检测（~/.hermit/data/model_signature.json）
 │   └── api/
 │       ├── routes.py          # API 路由
 │       └── schemas.py         # Pydantic 请求/响应模型
-├── models/                    # 开发时模型缓存（生产在 ~/.hermit/models/）
-└── docs/
-    └── design.md
+├── docs/
+│   ├── design.md
+│   ├── markdown-chunking.md
+│   ├── qdrant_standalone.md
+│   └── skill-distribution.md
+└── tests/
 
 ~/.hermit/                     # 运行时数据（HERMIT_HOME，可通过环境变量覆盖）
 ├── models/                    # 模型文件（fastembed ONNX cache）
+├── cache/
+│   ├── dense/                 # 嵌入向量磁盘缓存（sha256 keyed，TTL 7 天）
+│   └── sparse/
 ├── data/
-│   ├── qdrant/                # Qdrant 嵌入式存储
+│   ├── qdrant/                # Qdrant 数据（local / stand-alone 共用）
 │   ├── metadata/              # SQLite 元数据库（{collection}.db）
 │   ├── collections.json       # 知识库注册表
 │   └── model_signature.json   # 模型签名（变更检测）
 ├── logs/
 │   └── hermit.log             # 服务日志
-└── hermit.pid                 # 进程 PID 文件
+├── hermit.pid                 # 进程 PID 文件
+└── port.json                  # 持久化的服务端口
 ```
