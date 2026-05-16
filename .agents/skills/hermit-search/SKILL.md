@@ -11,10 +11,10 @@ Hermit 本地知识库检索服务使用指南。Hermit 提供四种搜索模式
 
 | 模式 | 召回 | Rerank（默认） | 适用场景 |
 |---|---|---|---|
-| `hybrid`（默认） | dense + sparse RRF | ✅ | 通用查询，最强相关性 |
+| `hybrid`（默认） | dense + FTS（BM25），LanceDB RRF 融合 | ✅ | 通用查询，最强相关性 |
 | `semantic` | dense only | ✅ | "我大概记得意思但不记得用词" |
-| `keyword` | sparse (BM25) only | ❌ | 关键词精确命中、最快 |
-| `fuzzy` | scroll + 正文/文件名 LIKE 子串 | ❌ | 找包含某子串的文件或段落、按文件名查找 |
+| `keyword` | FTS（tantivy BM25）only | ❌ | 关键词精确命中、最快 |
+| `fuzzy` | SQL `contains` 子串扫描 | ❌ | 找包含某子串的文件或段落、按文件名查找 |
 
 正交过滤参数：
 
@@ -42,7 +42,7 @@ hermit install-skills
 
 ### 模型下载
 
-首次使用前需下载模型（约 1GB）：
+首次使用前需下载模型（约 1.3GB，dense + reranker）：
 
 ```sh
 hermit download
@@ -52,40 +52,31 @@ hermit download
 
 ### 1. 启动服务
 
-**推荐：Stand-alone 模式启动**（Hermit 自动管理 Qdrant Docker 容器）
-
-```sh
-QDRANT_HOST=localhost hermit start
-```
-
-Stand-alone 模式相对 Local（embedded）模式的优势：
-
-- payload 索引（`text` / `filename` / `source_file`）真正生效，`fuzzy` 模式可在 server 端用 TEXT 索引粗筛，大库下显著更快
-- 无需进程级文件锁，多个客户端并发安全
-- 不会因为 Local 模式 numpy 写入竞争而损坏索引
-
-前提条件：本机装有 Docker。Hermit 启动时会自动 `docker run` 一个 `qdrant/qdrant:v1.17.0` 容器（命名 `hermit_qdrant`），进程退出时自动清理。
-
-**Local（embedded）模式**（无 Docker 时的回退）
-
 ```sh
 hermit start
 ```
 
-适用场景：临时试用、CI 环境、Docker 不可用。注意：payload 索引是 no-op（fuzzy 在大库下会全表扫），且单进程独占数据目录。
+Hermit 使用嵌入式 **LanceDB** 作为向量存储，无需 Docker、无外部进程。启动时会预加载 dense embedding 和 reranker 模型；reranker 在闲置超过 5 分钟后会自动卸载以释放 ONNX arena（实测可回收 ~1.1 GB 常驻），下次请求懒重载（实测冷启 ~0.3-1s）。
 
 输出示例：`{"status": "started", "pid": 12345, "port": 8000}`
 
-通过 `GET /health`（或 `hermit status`）的 `qdrant_mode` 字段可以确认当前部署模式。
+通过 `GET /health`（或 `hermit status`）的 `storage` 字段固定返回 `"lance"`，表明存储后端。
 
-### 2. 搜索内存策略
+### 2. 内存与并发策略
 
-Hermit 的搜索请求在服务端串行执行，不提供 `SEARCH_THREADS` 并发请求配置。这样可以避免多个请求同时占用共享 ONNX session 和 Cross-Encoder reranker，降低本地常驻内存和峰值内存。
+Hermit 的搜索请求在服务端串行执行，不提供 `SEARCH_THREADS` 并发请求配置——这样避免多个请求同时占用共享 ONNX session 和 cross-encoder reranker，降低本地常驻和峰值内存。
 
-单次 ONNX 推理的内部线程数可通过 `HERMIT_ONNX_THREADS` 调整，默认值为 `2`（ONNX Runtime 每线程会保留独立 arena，调大主要换来内存膨胀，仅在测得延迟收益时再调大）：
+单次 ONNX 推理的内部线程数可通过 `HERMIT_ONNX_THREADS` 调整，默认 `2`（ONNX Runtime 每线程会保留独立 arena，调大主要换来内存膨胀，仅在测得延迟收益时再调大）：
 
 ```sh
 HERMIT_ONNX_THREADS=2 hermit start
+```
+
+Reranker 闲置卸载阈值可通过环境变量微调：
+
+```sh
+HERMIT_RERANKER_IDLE_TIMEOUT=300       # 默认 300s；设为 0 关闭闲置卸载
+HERMIT_RERANKER_IDLE_CHECK_INTERVAL=60 # 后台检查频率，默认 60s
 ```
 
 ### 3. 添加知识库
@@ -116,7 +107,7 @@ hermit kb add my-project ~/code/project \
   --ignore-ext .png
 ```
 
-### 3. 更新知识库忽略规则
+### 4. 更新知识库忽略规则
 
 修改已有知识库的忽略配置（替换模式，非追加）：
 
@@ -139,7 +130,7 @@ hermit kb update my-project --ignore "dist/**" --ignore "*.log"
 hermit kb update my-project --clear-ignore --clear-ignore-ext
 ```
 
-### 4. 搜索
+### 5. 搜索
 
 ```sh
 hermit search <collection> [<query>] [--mode ...] [--filename PATTERN] [--top-k N]
@@ -175,7 +166,7 @@ hermit search my-notes "如何实现二分查找"
 hermit search my-notes "存储层架构演进" --mode semantic
 
 # 关键词模式（更快，跳过 rerank）
-hermit search my-notes "Qdrant" --mode keyword
+hermit search my-notes "lancedb" --mode keyword
 
 # Fuzzy 子串：找所有提到 "二分" 的段落
 hermit search my-notes "二分" --mode fuzzy
@@ -188,11 +179,11 @@ hermit search my-notes "embedding" --filename "docs/*.md"
 hermit search my-notes "向量数据库" --mode hybrid --filename design
 
 # 显式开/关精排
-hermit search my-notes "Qdrant" --mode keyword --rerank      # 关键词模式也走 rerank
+hermit search my-notes "lancedb" --mode keyword --rerank      # 关键词模式也走 rerank
 hermit search my-notes "向量数据库" --no-rerank                # 默认 hybrid 不走 rerank
 ```
 
-### 5. 其他管理命令
+### 6. 其他管理命令
 
 ```sh
 # 查看所有知识库
@@ -211,7 +202,7 @@ hermit collection status <name>
 hermit collection tasks <name>
 ```
 
-### 6. 服务生命周期
+### 7. 服务生命周期
 
 ```sh
 hermit status    # 查看服务状态
@@ -241,21 +232,19 @@ hermit --pretty search my-notes "query"
 
 ## 技术细节
 
-- **Embedding 模型**：jinaai/jina-embeddings-v2-base-zh（768 维）
-- **Sparse 模型**：Qdrant/bm25
-- **Reranker**：jinaai/jina-reranker-v2-base-multilingual
-- **向量数据库**：Qdrant（推荐 Stand-alone Docker 模式；Local embedded 模式仅作回退）
+- **Embedding 模型**：jinaai/jina-embeddings-v2-base-zh（768 维 dense）
+- **Reranker**：jinaai/jina-reranker-v2-base-multilingual（cross-encoder，闲置 5 分钟自动卸载）
+- **向量数据库**：LanceDB（嵌入式列存，自带 tantivy FTS 提供 BM25 关键词召回）
 - **推理后端**：fastembed（ONNX Runtime，纯 CPU）
 - **数据目录**：`~/.hermit/`（可通过 `HERMIT_HOME` 环境变量覆盖）
-- **部署模式查询**：`GET /health` 返回 `qdrant_mode`（`"local"` / `"standalone"`）和 `qdrant_host`
+  - `data/lance/` — 每个 collection 一张 LanceDB 表
+  - `data/metadata/` — 每个 collection 一个 SQLite 元数据库
+- **存储后端查询**：`GET /health` 的 `storage` 字段固定返回 `"lance"`
 
 ## 搜索模式实现细节
 
-- **hybrid**：dense + sparse 各自召回 `rerank_candidates` 个候选 → Qdrant 服务端 RRF 融合 → cross-encoder 精排取 top-k
-- **semantic**：仅 dense 召回 → 精排
-- **keyword**：仅 sparse (BM25) 召回，默认跳过精排（追求速度）。需要时用 `--rerank` 显式启用
-- **fuzzy**：不走任何向量；通过 Qdrant scroll 分页扫描候选 chunk，再做 Python 端大小写不敏感的 `query in text` 子串验证。语义是真正的 LIKE 子串（不是 token 关键词），适合"我只记得里面有某个词"。结果按 `(source_file, chunk_index)` 排序后截 top-k。
-  - **Stand-alone 模式**：`text` 字段的 TEXT payload 索引被用作粗筛（`MatchText(query)`），Qdrant 端先把候选量降到很小，再 Python 验证子串
-  - **Local（embedded）模式**：payload 索引是 no-op，全靠 scroll 分页 + Python 子串扫；个人量级（万级 chunk）完全够用，但十万级以上会偏慢——已知限制，未来若有需要再加本地倒排
-  - 任意模式都有安全上限 `_FUZZY_MAX_SCAN`（默认 100k chunks），到达后 Server 日志告警并停止扫描
-- **filename 过滤**：纯子串走 Qdrant `MatchText`（数据库侧过滤）；含 `*?[` 的 glob 走 Python `fnmatch` 后过滤，可同时匹配 basename 或完整路径
+- **hybrid**：LanceDB 内置 `query_type="hybrid"`，dense 向量召回 + FTS 召回各自取 `rerank_candidates` 个候选，`RRFReranker` 按倒数排名融合，cross-encoder 精排取 top-k
+- **semantic**：仅 dense 向量召回 → cross-encoder 精排
+- **keyword**：仅 FTS（tantivy BM25）召回，默认跳过精排（追求速度）。需要时用 `--rerank` 显式启用
+- **fuzzy**：不走任何向量或 BM25 索引；通过 LanceDB SQL `contains(lower(text), '<needle>')` 谓词扫描，DataFusion 下推到列文件，扫描成本与命中数线性相关。按 `(source_file, chunk_index)` 排序后截 top-k。结果不带分数（`score=null`）
+- **filename 过滤**：纯子串走 LanceDB SQL `contains(lower(filename), '<needle>')` 作为 prefilter 下推；含 `*?[` 的 glob 走 Python `fnmatch` 后过滤，可同时匹配 basename 或完整路径
