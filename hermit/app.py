@@ -20,10 +20,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Search requests are intentionally serialized.  The ONNX models are large
-# shared sessions with retained native buffers; concurrent request execution
-# raises memory pressure without enough benefit for Hermit's local use case.
-_SEARCH_WORKERS = 1
+# Search-request executor pool size. Default 1 keeps the historical serialized
+# behavior (one reranker / one ONNX session = small steady-state arena). Agent-
+# style deep-search workloads can fan out — bump via HERMIT_SEARCH_WORKERS=N
+# at your own memory-cost risk: ONNX sessions are thread-safe and release the
+# GIL during inference, but each concurrent run grows the arena high-water-mark.
+# Pair with reranker idle-unload (HERMIT_RERANKER_IDLE_TIMEOUT) to reclaim
+# the peak after bursts. See problems/concurrent-search-rss-blowup.md for
+# measured costs at 2/4 workers on this codebase.
+import os as _os
+_SEARCH_WORKERS = int(_os.environ.get("HERMIT_SEARCH_WORKERS", 1))
 
 # ── Server state ────────────────────────────────────────────────
 _server_start_time: float | None = None
@@ -53,7 +59,12 @@ async def lifespan(app: FastAPI):
         max_workers=_SEARCH_WORKERS,
         thread_name_prefix="search",
     )
-    logger.info("Search executor: serialized (%d worker)", _SEARCH_WORKERS)
+    logger.info(
+        "Search executor: %s (%d worker%s)",
+        "serialized" if _SEARCH_WORKERS == 1 else "parallel",
+        _SEARCH_WORKERS,
+        "" if _SEARCH_WORKERS == 1 else "s",
+    )
 
     # Auto-download missing models before loading them
     from hermit.models import ensure_models, ensure_quantized_models
