@@ -13,7 +13,6 @@ from hermit.config import (
     DENSE_MODEL,
     MODEL_ROOT,
     RERANKER_MODEL,
-    SPARSE_MODEL,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,11 +29,6 @@ MODELS = [
             "tokenizer_config.json",
             "special_tokens_map.json",
         ],
-    },
-    {
-        "repo_id": SPARSE_MODEL,
-        "description": "Sparse embedding (BM25)",
-        "allow_patterns": None,  # small model, download everything
     },
     {
         "repo_id": RERANKER_MODEL,
@@ -170,7 +164,7 @@ def ensure_quantized_models():
 
 def verify_models():
     """Quick smoke test: load each model and run a dummy inference."""
-    from fastembed import SparseTextEmbedding, TextEmbedding
+    from fastembed import TextEmbedding
     from fastembed.rerank.cross_encoder import TextCrossEncoder
 
     logger.info("Verifying models...")
@@ -180,10 +174,6 @@ def verify_models():
     vec = list(dense.embed(["test"]))[0]
     assert len(vec) == DENSE_DIM, f"Expected dim {DENSE_DIM}, got {len(vec)}"
     logger.info("  Dense embedding OK (dim=%d)", len(vec))
-
-    sparse = SparseTextEmbedding(model_name=SPARSE_MODEL, cache_dir=cache)
-    svec = list(sparse.embed(["test"]))[0]
-    logger.info("  Sparse embedding OK (indices=%d)", len(svec.indices))
 
     reranker = TextCrossEncoder(model_name=RERANKER_MODEL, cache_dir=cache)
     scores = list(reranker.rerank("query", ["relevant doc", "irrelevant"]))

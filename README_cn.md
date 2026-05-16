@@ -11,10 +11,9 @@ Hermit 是一个**自包含、纯本地运行的语义检索服务**，用于把
 - **完全本地运行**：模型、向量数据和元数据都保存在项目目录中
 - **Markdown 语义切片**：状态机解析器将 `.md` 文件拆分为 11 种语义完整的 block 类型（标题、代码块、数学公式、表格、列表……），代码块和表格不会被从中间截断
 - **Heading-Aware 滑动窗口**：chunk 尽量从 section 标题开始，每个 chunk 无需外部上下文即可自我表达所属 section，检索命中质量更高
-- **双向量存储模式**：自动处理嵌入式 (Local) 和独立部署 (Standalone Docker) Qdrant 后端。
-- **多线程搜索加速**：通过 `ThreadPoolExecutor` 并行执行基于 ONNX 的重排推理，绕过 GIL，搜索吞吐量提升约 3 倍。
+- **嵌入式向量存储**：LanceDB 列存，无 Docker、无外部进程
 - **多 collection 支持**：一个目录对应一个 collection
-- **混合检索**：dense + sparse 双路召回
+- **混合检索**：dense 向量 + tantivy FTS（BM25），通过 RRF 融合
 - **重排**：使用 cross-encoder 对融合后的候选结果进行 rerank
 - **增量同步**：启动时扫描，运行时定期轮询检测变化
 - **CPU 友好**：基于 `fastembed` + ONNX Runtime，无需 GPU
@@ -35,11 +34,10 @@ Hermit 很适合这些场景：
 
 Hermit 的搜索流程如下：
 
-1. 将 query 编码为 dense 和 sparse 两种表示
-2. 在 Qdrant 中执行混合召回
-3. 使用 RRF 融合候选结果
-4. 对候选结果执行 rerank
-5. 返回最相关的 chunk
+1. 将 query 编码为 dense 向量
+2. 在 LanceDB 中执行混合召回（向量 + tantivy FTS），用 RRF 融合
+3. 用 cross-encoder 对候选结果做 rerank
+4. 返回最相关的 chunk
 
 ### 索引流程
 
@@ -48,8 +46,8 @@ Hermit 的搜索流程如下：
 1. 启动扫描
 2. SQLite 元数据对比
 3. 文本分块（见下文）
-4. 生成向量
-5. 写入 Qdrant
+4. 生成 dense 向量
+5. 写入 LanceDB（FTS 索引随写入自动更新）
 6. 定期轮询检测
 
 ### Markdown 语义切片
@@ -88,8 +86,6 @@ Hermit 的搜索流程如下：
 - Chunk size: `256` tokens（使用 embedding 模型的 tokenizer）
 - Chunk overlap: `32` tokens
 - 搜索 `top_k`: `5`
-- 默认 `w_dense`: `0.7`
-- 默认 `w_sparse`: `0.3`
 - 默认 rerank candidates: `20`
 - collection 数量上限: `4`
 - collection 名称最大长度: `64`
@@ -98,22 +94,13 @@ Hermit 的搜索流程如下：
 ## 技术栈
 
 - **API 框架**: FastAPI
-- **向量数据库**: Qdrant (双模式: 内置嵌入式 or 独立 Docker 容器)
+- **向量数据库**: LanceDB（嵌入式列存，自带 tantivy FTS）
 - **推理后端**: fastembed (基于 ONNX, 支持 `ThreadPoolExecutor` 并行化)
 - **元数据存储**: SQLite
 - **文件监听**: 定期轮询 (Polling)
 
-## 向量存储模式
-
-Hermit 会根据环境变量自动切换存储模式：
-
-1. **Local 模式 (默认)**：直接在 `data/qdrant/` 使用嵌入式客户端，无需配置。
-2. **Standalone 模式**：如果设置了 `QDRANT_HOST`（例如 `QDRANT_HOST=localhost`），Hermit 将自动管理一个独立运行的 Qdrant Docker 容器。该模式在处理大规模索引请求时性能更佳，且方便持久化管理。
-
-强制启动 Standalone 模式：
-```bash
-QDRANT_HOST=localhost hermit start
-```
+关键词检索由 LanceDB 自带的 tantivy FTS 提供，不再单独加载稀疏 embedding
+模型。存储布局、索引策略、查询语义见 [docs/lancedb.md](docs/lancedb.md)。
 
 ## 性能与内存
 
@@ -133,7 +120,7 @@ Hermit 针对本地搜索的稳定内存占用进行了优化：
 ├── docs/
 │   ├── design.md
 │   ├── markdown-chunking.md
-│   ├── qdrant_standalone.md
+│   ├── lancedb.md
 │   └── skill-distribution.md
 ├── hermit/
 │   ├── app.py                 # FastAPI 应用 + lifespan
@@ -154,20 +141,18 @@ Hermit 针对本地搜索的稳定内存占用进行了优化：
 │   │   ├── reranker.py
 │   │   └── searcher.py
 │   └── storage/
+│       ├── lance.py           # LanceDB 向量存储
 │       ├── metadata.py        # 每 collection 一个 SQLite
 │       ├── model_signature.py
-│       ├── qdrant.py
-│       ├── qdrant_docker.py   # Stand-alone Docker 容器生命周期
-│       ├── qdrant_mode_signature.py
 │       ├── quantizer.py       # dense embedder 的 INT8 量化
 │       └── registry.py
 └── tests/
 
 ~/.hermit/                     # 运行时数据（可用 HERMIT_HOME 覆盖）
 ├── models/                    # ONNX 权重（fastembed cache）
-├── cache/{dense,sparse}/      # 嵌入向量缓存（sha256 key，TTL 7 天）
+├── cache/dense/               # dense 嵌入向量缓存（sha256 key，TTL 7 天）
 ├── data/
-│   ├── qdrant/                # Qdrant 数据（local 和 standalone 共用同一份）
+│   ├── lance/                 # LanceDB 表（每个 collection 一张）
 │   ├── metadata/              # 每 collection 一个 SQLite
 │   ├── collections.json       # 注册表
 │   └── model_signature.json
@@ -257,8 +242,7 @@ collection 名称规则：
 ### 3. 启动服务
 
 ```bash
-hermit start                          # local 模式（嵌入式 Qdrant）
-QDRANT_HOST=localhost hermit start    # stand-alone 模式（Qdrant Docker，推荐）
+hermit start
 ```
 
 启动时，Hermit 会：
@@ -288,7 +272,7 @@ hermit stop       # 优雅停服
 
 ```bash
 hermit search my_docs "two sum 的思路"
-hermit search my_docs "Qdrant" --mode keyword          # BM25 only，更快
+hermit search my_docs "lancedb" --mode keyword          # FTS only，更快
 hermit search my_docs "二分"   --mode fuzzy             # 子串扫描
 hermit search my_docs "design" --mode fuzzy --filename "*.md"
 hermit search my_docs "embedding" --no-rerank --top-k 3
@@ -318,7 +302,7 @@ curl -X POST http://127.0.0.1:8000/search \
 
 | 命令 | 用途 |
 |---|---|
-| `hermit start` | 后台启动服务（uvicorn daemon）。设置 `QDRANT_HOST=localhost` 进 stand-alone 模式。 |
+| `hermit start` | 后台启动服务（uvicorn daemon）。 |
 | `hermit stop` | 优雅停止（SIGTERM，10 秒后退化为 SIGKILL）。 |
 | `hermit status` | 健康 JSON：模式、uptime、collections、待处理任务等。 |
 | `hermit logs` | 流式查看 `~/.hermit/logs/hermit.log`（非 JSON）。 |
@@ -447,7 +431,7 @@ curl -X POST http://127.0.0.1:8000/search \
 
 ### `DELETE /collections/{name}`
 
-删除 collection：停掉文件监听 → 等后台索引队列清空 → 删 Qdrant collection → 删 SQLite 元数据 → 从注册表移除。
+删除 collection：停掉文件监听 → 等后台索引队列清空 → 删 LanceDB 表 → 删 SQLite 元数据 → 从注册表移除。
 
 若 30 秒内后台索引任务无法清空，返回 `409`，稍后重试。
 
@@ -474,18 +458,17 @@ curl -X POST http://127.0.0.1:8000/search \
 - `models_loaded` — 模型是否已加载完成
 - `collections` — 各 collection 的 `{name, indexed_files, total_chunks}`
 - `pending_index_tasks` — 全部 collection 待处理的后台索引任务总数
-- `qdrant_mode` — `"local"`（嵌入式）或 `"standalone"`（外部 Qdrant 服务）
-- `qdrant_host` — standalone 模式下的 host 地址；local 模式下为 `null`
+- `storage` — 固定为 `"lance"`（LanceDB 嵌入式存储）
 
 ## 数据存储
 
 Hermit 默认把所有运行时数据存到 `~/.hermit/`（可用 `HERMIT_HOME` 环境变量覆盖）：
 
 - `~/.hermit/models/`: 本地模型缓存（fastembed ONNX 权重）
-- `~/.hermit/data/qdrant/`: Qdrant 数据 —— local 与 stand-alone 两种模式共用同一份目录
+- `~/.hermit/data/lance/`: LanceDB 表，每个 collection 一张
 - `~/.hermit/data/metadata/`: 每个 collection 一个 SQLite 数据库
 - `~/.hermit/data/collections.json`: collection 持久化配置
-- `~/.hermit/cache/dense/` 与 `~/.hermit/cache/sparse/`: 嵌入向量缓存（sha256 keyed，TTL 7 天）
+- `~/.hermit/cache/dense/`: dense 嵌入向量缓存（sha256 keyed，TTL 7 天）
 - `~/.hermit/logs/hermit.log`: 服务日志
 - `~/.hermit/hermit.pid` 和 `~/.hermit/port.json`: daemon 状态文件
 
@@ -507,7 +490,7 @@ Hermit 通过 SQLite 跟踪已索引文件，并使用 **SHA256** 检测内容�
 
 - **新增文件**：入队或直接索引
 - **修改文件**：重新切块、重建向量并替换旧数据
-- **删除文件**：从 Qdrant 和 SQLite 中移除
+- **删除文件**：从 LanceDB 和 SQLite 中移除
 
 ### 分块规则
 
@@ -518,7 +501,7 @@ Hermit 通过 SQLite 跟踪已索引文件，并使用 **SHA256** 检测内容�
 
 ## 已知限制
 
-- API 接受 `w_dense` 和 `w_sparse` 参数，但当前实现使用的是 **RRF 融合**，并非显式加权分数融合
+- 混合检索使用 LanceDB 内置的 RRF 融合，不再暴露 `w_dense`/`w_sparse` 显式权重
 - 所有文件均按文本处理；PDF、图片和 Office 文档解析不在当前范围内
 - collection 数量上限目前是 `4`
 - 首次模型下载可能较慢，并会占用一定磁盘空间

@@ -2,20 +2,19 @@
 ## 分层结构：
 
 1. **Ingestion 层**：文件夹扫描 + 定期轮询 → 变更检测（SQLite）→ 文本切片 → 向量化 → 入库
-2. **检索层 (Recall)**：Dense + Sparse 双路召回，Qdrant RRF 融合
+2. **检索层 (Recall)**：Dense 向量 + LanceDB FTS（tantivy）双路召回，LanceDB 内置 RRF 融合
 3. **精排层 (Rerank)**：Cross-Encoder 处理 Top 50 候选集
 4. **服务层**：FastAPI 暴露 OpenAPI 接口
 
-支持**多知识库**：每个文件夹 = 一个独立的 Qdrant collection。
+支持**多知识库**：每个文件夹 = 一个独立的 LanceDB 表。
 
 ### 推理后端
 
-使用 **fastembed**（基于 ONNX Runtime）作为统一推理后端。所有模型（embedding、sparse、reranker）均通过 fastembed 加载 ONNX 格式权重，CPU 推理，无需 PyTorch 或 GPU 依赖。
+使用 **fastembed**（基于 ONNX Runtime）作为 dense embedding 与 reranker 的推理后端。模型均通过 fastembed 加载 ONNX 格式权重，CPU 推理，无需 PyTorch 或 GPU 依赖。关键词检索由 LanceDB 自带的 tantivy FTS 提供，不再单独加载 sparse embedding 模型。
 
 选型理由：
 - 依赖轻量，无需安装 PyTorch（节省数 GB 磁盘和安装时间）
 - ONNX Runtime 在 Apple Silicon 上具有良好的 CPU 推理性能
-- 与 Qdrant 同生态，API 设计简洁
 - 自动管理模型下载和缓存
 
 **约束**：模型选择受限于 fastembed 支持的 ONNX 预转换模型列表。
@@ -50,7 +49,7 @@
 
 变更检测仅对比 `file_hash`（SHA256），`file_mtime` 作为记录字段保留但不参与判定。
 
-**选用 SQLite 的理由**：启动时对每个文件查 Qdrant payload 效率低；SQLite 单次全表扫描即可完成对比，天然适合存储关系型元数据。
+**选用 SQLite 的理由**：启动时对每个文件查 LanceDB 效率低；SQLite 单次全表扫描即可完成对比，天然适合存储关系型元数据。
 
 ### 文本切片
 
@@ -65,55 +64,59 @@
 ### 索引流程
 
 1. 递归扫描文件夹（`rglob("*")`），逐文件对比 SHA256 与 SQLite 记录
-2. **新增/修改文件**：切片 → 向量化 → 按 `source_file` 删除旧 chunks → 插入新 chunks（UUID 作为 point ID）→ 更新 SQLite
-3. 后台线程定期轮询执行扫描逻辑（Scanning Watcher中对应 chunks → 删除 SQLite 记录
+2. **新增/修改文件**：切片 → dense 向量化 → 按 `source_file` 删除旧 chunks → 插入新 chunks（UUID 作为行 id）→ 更新 SQLite。`replace_file_chunks` 完成后调用一次 `tbl.optimize()` 让 FTS 索引立即包含新写入的行
+3. 后台线程定期轮询执行扫描逻辑
 4. watchdog 监听到文件事件时执行全量 rescan 逻辑（防抖后）
 
 ---
 
-## 存储 Schema（Qdrant）
+## 存储 Schema（LanceDB）
 
-每个知识库 = 1 个 collection，使用 **named vectors**。Qdrant 支持两种部署模式：
-- **Local 模式（默认）**：`QdrantClient(path=...)`，引擎运行在 Hermit 主进程内
-- **Stand-alone 模式**：`QDRANT_HOST=localhost`，Hermit 自动管理一个 `qdrant/qdrant:v1.17.0` Docker 容器（详见 `docs/qdrant_standalone.md`）
+每个知识库 = 1 张 LanceDB 表，磁盘布局为 `~/.hermit/data/lance/<name>.lance`。LanceDB 是嵌入式列存（基于 Apache Arrow），通过 `lancedb.connect(path)` 直接打开，单进程多线程并发安全，无独立服务。
 
-两种模式共用同一份磁盘数据（`~/.hermit/data/qdrant/`），可以无缝切换。
+### 表结构
 
-### 向量配置
-
-| 向量名 | 维度 | 距离 | 说明 |
-|---|---|---|---|
-| `dense` | 768 | Cosine | jina-embeddings-v2-base-zh 语义向量 |
-| `sparse` | 可变 | Dot | BM25 稀疏词权重向量 |
-
-### Payload 结构
-
-| 字段 | 类型 | 说明 |
+| 列 | 类型 | 说明 |
 |---|---|---|
-| `title` | string | 文件名（不含扩展名） |
+| `id` | string | UUID4，每个 chunk 一个 |
 | `text` | string | 切片原文 |
+| `title` | string | 文件名（含原始大小写） |
+| `filename` | string | 小写化的 basename stem，便于 FTS / `contains()` 子串过滤 |
 | `source_file` | string | 源文件绝对路径 |
-| `chunk_index` | int | 该切片在源文件中的位置（0-based） |
-| `total_chunks` | int | 该源文件的总切片数 |
+| `chunk_index` | int32 | 0-based 切片序号 |
+| `total_chunks` | int32 | 该源文件的切片总数 |
+| `vector` | fixed_size_list<float32, 768> | jina-embeddings dense 向量 |
 
-在 `source_file` 上建 **payload index**（KEYWORD 类型），确保按文件过滤/删除高效。
+### 索引策略
+
+| 索引 | 列 | 时机 | 说明 |
+|---|---|---|---|
+| FTS（tantivy） | `text` | `ensure_collection` 即建 | keyword / hybrid 检索 |
+| FTS（tantivy） | `filename` | `ensure_collection` 即建 | filename 过滤 |
+| Scalar BTREE | `source_file` | `ensure_collection` 即建 | 按文件删除 |
+| 向量 IVF/HNSW | `vector` | `count_rows() ≥ 50_000` 后懒建 | 小规模下裸扫更快 |
 
 ### 查询文件全部切片
 
-通过 `source_file` payload filter 查询，配合 `chunk_index` 排序还原原文顺序。`total_chunks` 字段让调用方判断是否获取完整。
+通过 `source_file` 列上的 SQL `where` 谓词查询，配合 `chunk_index` 排序还原原文顺序。`total_chunks` 字段让调用方判断是否获取完整。
 
 ---
 
 ## 混合召回融合策略
 
-使用 Qdrant 原生的 **Reciprocal Rank Fusion (RRF)**：
+使用 **LanceDB 内置 hybrid + RRFReranker**：
 
-1. 使用 Qdrant `prefetch` + `query` API 进行双路召回
-2. Dense prefetch 和 Sparse prefetch 各取 Top-N 候选（N = rerank_candidates，默认 20）
-3. Qdrant 服务端执行 RRF 融合，合并去重
-4. 融合后取 Top-N 候选送入 Reranker
+```python
+tbl.search((dense_vec, query), query_type="hybrid")
+   .where(filename_filter, prefilter=True)
+   .limit(rerank_candidates)
+   .rerank(RRFReranker())
+   .to_list()
+```
 
-API 中 `w_dense`/`w_sparse` 参数保留，当前未使用。
+LanceDB 内部并行执行向量召回与 FTS 召回，再用 Reciprocal Rank Fusion 融合两个排序，融合后取 Top-N 候选送入 cross-encoder 精排。
+
+`w_dense`/`w_sparse` 显式权重不再暴露——LanceDB `RRFReranker` 仅按排序融合，没有等价的加权 API。
 
 ---
 
@@ -124,7 +127,6 @@ API 中 `w_dense`/`w_sparse` 参数保留，当前未使用。
 | 模型 | 用途 | 大小 | 说明 |
 |---|---|---|---|
 | `jinaai/jina-embeddings-v2-base-zh` | Dense Embedding (768 维) | ~0.64GB | 中英双语语义向量 |
-| `Qdrant/bm25` | Sparse Embedding | <50MB | BM25 稀疏词权重 |
 | `jinaai/jina-reranker-v2-base-multilingual` | Reranker (Cross-Encoder) | ~0.7GB | 多语言 reranker |
 
 ---
@@ -141,7 +143,7 @@ API 中 `w_dense`/`w_sparse` 参数保留，当前未使用。
 ### 实现细节
 
 - Reranker 对候选集重新排序，返回排序后的 **索引列表**
-- 最终返回的 `score` 字段为 Qdrant RRF 融合分数，非 Reranker 分数
+- 最终返回的 `score` 字段优先取 LanceDB 的 `_relevance_score`（hybrid + rerank 后的 RRF 分数），其次 `_distance` 或 `_score`
 
 ---
 
@@ -160,7 +162,7 @@ API 中 `w_dense`/`w_sparse` 参数保留，当前未使用。
 
 - 由 `config.py` 统一定义 `HERMIT_HOME`（默认 `~/.hermit/`，可通过 `HERMIT_HOME` 环境变量覆盖）
 - `MODEL_ROOT = HERMIT_HOME / "models"`
-- `DATA_ROOT = HERMIT_HOME / "data"`（含 Qdrant + SQLite 元数据）
+- `DATA_ROOT = HERMIT_HOME / "data"`（含 LanceDB 表 + SQLite 元数据）
 - 所有模型加载均基于此路径，不在各模块中硬编码
 - fastembed 的 `cache_dir` 参数指向 `MODEL_ROOT`
 
@@ -178,8 +180,8 @@ API 中 `w_dense`/`w_sparse` 参数保留，当前未使用。
 
 ### 检索流程
 
-1. fastembed 编码 query → dense 向量 + sparse 向量
-2. Qdrant prefetch 双路召回 → RRF 融合 → Top 50 候选
+1. fastembed 编码 query → dense 向量
+2. LanceDB 同时跑向量召回 + FTS 召回，RRFReranker 融合 → Top 候选
 3. Cross-Encoder 对候选集精排
 4. 返回 Top-K 结果（含切片原文、来源文件路径、切片位置、融合分数）
 
@@ -187,7 +189,7 @@ API 中 `w_dense`/`w_sparse` 参数保留，当前未使用。
 
 - **Collection 注册表持久化**：`~/.hermit/data/collections.json` 记录所有已注册知识库（folder_path、ignore_patterns、ignore_extensions）。服务启动时自动加载并恢复所有 collection，无需重新注册。
 - **Watchdog 自动恢复**：服务启动时为每个已注册 collection 自动启动文件监听。
-- **模型变更检测**：`~/.hermit/data/model_signature.json` 记录上次使用的 embedding 模型。若模型发生变更，启动时自动触发所有 collection 的全量重建索引。
+- **模型变更检测**：`~/.hermit/data/model_signature.json` 记录上次使用的 dense embedding 模型。若模型发生变更，启动时自动触发所有 collection 的全量重建索引。
 
 ---
 
@@ -196,11 +198,10 @@ API 中 `w_dense`/`w_sparse` 参数保留，当前未使用。
 | 组件 | 实际占用 |
 |---|---|
 | jina-embeddings-v2-base-zh (Dense) | ~640MB |
-| Qdrant/bm25 (Sparse) | <50MB |
-| jina-reranker-v2-base-multilingual (Reranker) | ~700MB |
-| Qdrant（嵌入式） | ~100-500MB（取决于数据量） |
+| jina-reranker-v2-base-multilingual (Reranker) | ~700MB（idle 后会被卸载，见 `design/reranker-idle-unload.md`） |
+| LanceDB（嵌入式） | ~50-200MB（取决于数据量） |
 | 系统 + FastAPI + ONNX Runtime | ~500MB |
-| **总计** | **~2-2.5GB** |
+| **总计** | **~1.5-2GB** |
 
 远低于 64GB 上限，无内存压力。
 
@@ -223,15 +224,13 @@ hermit/
 │   │   ├── chunker.py         # token 级文本切片 + markdown 语义切片
 │   │   └── task_queue.py      # 后台索引任务队列（线程池）
 │   ├── retrieval/
-│   │   ├── embedder.py        # Dense (TextEmbedding) + Sparse (SparseTextEmbedding)
-│   │   ├── embed_cache.py     # diskcache 落地的 per-model 嵌入缓存（sha256 keyed）
-│   │   ├── searcher.py        # Qdrant prefetch + RRF 融合 + rerank
-│   │   └── reranker.py        # TextCrossEncoder
+│   │   ├── embedder.py        # Dense (TextEmbedding) only
+│   │   ├── embed_cache.py     # diskcache 落地的 dense 嵌入缓存（sha256 keyed）
+│   │   ├── searcher.py        # LanceDB hybrid + filename filter + rerank
+│   │   └── reranker.py        # TextCrossEncoder（含 idle unload）
 │   ├── storage/
-│   │   ├── qdrant.py          # Qdrant 客户端（local / stand-alone 自适应）+ collection 管理
-│   │   ├── qdrant_docker.py   # Stand-alone Docker 容器生命周期
-│   │   ├── qdrant_mode_signature.py  # 检测 local↔standalone 切换时的兼容性
-│   │   ├── quantizer.py       # dense embedder 的 INT8 量化加载
+│   │   ├── lance.py           # LanceDB 表管理 + replace_file_chunks
+│   │   ├── quantizer.py       # dense embedder / reranker 的 INT8 量化加载
 │   │   ├── metadata.py        # SQLite 元数据管理
 │   │   ├── registry.py        # 知识库注册表（~/.hermit/data/collections.json）
 │   │   └── model_signature.py # 模型变更检测（~/.hermit/data/model_signature.json）
@@ -240,18 +239,17 @@ hermit/
 │       └── schemas.py         # Pydantic 请求/响应模型
 ├── docs/
 │   ├── design.md
+│   ├── lancedb.md
 │   ├── markdown-chunking.md
-│   ├── qdrant_standalone.md
 │   └── skill-distribution.md
 └── tests/
 
 ~/.hermit/                     # 运行时数据（HERMIT_HOME，可通过环境变量覆盖）
 ├── models/                    # 模型文件（fastembed ONNX cache）
 ├── cache/
-│   ├── dense/                 # 嵌入向量磁盘缓存（sha256 keyed，TTL 7 天）
-│   └── sparse/
+│   └── dense/                 # dense 嵌入向量磁盘缓存（sha256 keyed，TTL 7 天）
 ├── data/
-│   ├── qdrant/                # Qdrant 数据（local / stand-alone 共用）
+│   ├── lance/                 # LanceDB 表，每个 collection 一张
 │   ├── metadata/              # SQLite 元数据库（{collection}.db）
 │   ├── collections.json       # 知识库注册表
 │   └── model_signature.json   # 模型签名（变更检测）

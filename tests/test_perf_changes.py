@@ -195,7 +195,7 @@ h1 = _test_file_hash(f1)
 mtime1 = os.path.getmtime(f1)
 
 # Simulate: same mtime → should skip
-# (We can't easily test the full scan_folder without qdrant, but verify logic)
+# (We can't easily test the full scan_folder without the vector store, but verify logic)
 assert h1 and len(h1) == 64  # sha256 hex
 assert mtime1 > 0
 print(f"  file_hash OK: {h1[:16]}...")
@@ -225,17 +225,13 @@ except ImportError:
             break
 print("  PASS")
 
-# ── Test 6: qdrant replace_file_chunks exists ────────────────
+# ── Test 6: lance replace_file_chunks exists ────────────────
 print("=" * 60)
-print("Test 6: qdrant.replace_file_chunks function exists")
-try:
-    from hermit.storage import qdrant
-    assert hasattr(qdrant, "replace_file_chunks")
-    assert callable(qdrant.replace_file_chunks)
-    print("  replace_file_chunks exists and callable")
-except ImportError:
-    # qdrant_client not installed in test env
-    print("  SKIP (qdrant_client not available)")
+print("Test 6: lance.replace_file_chunks function exists")
+from hermit.storage import lance
+assert hasattr(lance, "replace_file_chunks")
+assert callable(lance.replace_file_chunks)
+print("  replace_file_chunks exists and callable")
 print("  PASS")
 
 # ── Summary ───────────────────────────────────────────────────

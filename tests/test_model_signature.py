@@ -1,7 +1,6 @@
 """Tests for model signature change detection and rebuild logic."""
 
 import json
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -29,7 +28,6 @@ class TestCheckModelChanged:
         assert changed is False
         assert old_sig is None
         assert new_sig["dense_model"] != ""
-        assert new_sig["sparse_model"] != ""
         # Signature file should have been created
         assert (tmp_data_root / "model_signature.json").exists()
 
@@ -37,9 +35,7 @@ class TestCheckModelChanged:
         """Second run with same models: should report no change."""
         from hermit.storage.model_signature import check_model_changed
 
-        # First run creates the file
         check_model_changed()
-        # Second run should find no change
         changed, old_sig, new_sig = check_model_changed()
 
         assert changed is False
@@ -47,12 +43,11 @@ class TestCheckModelChanged:
 
     def test_detects_dense_model_change(self, tmp_data_root):
         """Should detect when dense model changes."""
-        from hermit.storage.model_signature import check_model_changed, _SIGNATURE_PATH
+        from hermit.storage.model_signature import check_model_changed
 
         sig_path = tmp_data_root / "model_signature.json"
         sig_path.write_text(json.dumps({
             "dense_model": "old-model/dense-v1",
-            "sparse_model": "Qdrant/bm25",
         }, indent=2))
 
         changed, old_sig, new_sig = check_model_changed()
@@ -61,37 +56,22 @@ class TestCheckModelChanged:
         assert old_sig["dense_model"] == "old-model/dense-v1"
         assert new_sig["dense_model"] != "old-model/dense-v1"
 
-    def test_detects_sparse_model_change(self, tmp_data_root):
-        """Should detect when sparse model changes."""
+    def test_legacy_signature_with_sparse_field_is_treated_as_changed(self, tmp_data_root):
+        """A pre-LanceDB signature carrying ``sparse_model`` mismatches the
+        new schema and should trigger a one-time rebuild."""
         from hermit.storage.model_signature import check_model_changed
 
         sig_path = tmp_data_root / "model_signature.json"
         sig_path.write_text(json.dumps({
             "dense_model": "jinaai/jina-embeddings-v2-base-zh",
-            "sparse_model": "old-model/sparse-v1",
+            "sparse_model": "Qdrant/bm25",
         }, indent=2))
 
         changed, old_sig, new_sig = check_model_changed()
 
         assert changed is True
-        assert old_sig["sparse_model"] == "old-model/sparse-v1"
-        assert new_sig["sparse_model"] != "old-model/sparse-v1"
-
-    def test_detects_both_models_changed(self, tmp_data_root):
-        """Should detect when both models change."""
-        from hermit.storage.model_signature import check_model_changed
-
-        sig_path = tmp_data_root / "model_signature.json"
-        sig_path.write_text(json.dumps({
-            "dense_model": "old/dense",
-            "sparse_model": "old/sparse",
-        }, indent=2))
-
-        changed, old_sig, new_sig = check_model_changed()
-
-        assert changed is True
-        assert old_sig["dense_model"] == "old/dense"
-        assert old_sig["sparse_model"] == "old/sparse"
+        assert "sparse_model" in old_sig
+        assert "sparse_model" not in new_sig
 
 
 class TestSaveAndLoadSignature:
@@ -105,13 +85,13 @@ class TestSaveAndLoadSignature:
         sig = load_saved_signature()
         assert sig is not None
         assert "dense_model" in sig
-        assert "sparse_model" in sig
+        assert "sparse_model" not in sig
 
     def test_save_overwrites_old(self, tmp_data_root):
         from hermit.storage.model_signature import save_signature, load_saved_signature
 
         sig_path = tmp_data_root / "model_signature.json"
-        sig_path.write_text(json.dumps({"dense_model": "old", "sparse_model": "old"}))
+        sig_path.write_text(json.dumps({"dense_model": "old"}))
 
         save_signature()
         sig = load_saved_signature()
@@ -124,10 +104,10 @@ class TestSaveAndLoadSignature:
 class TestRebuildCollection:
     """Tests for rebuild_collection() in scanner module."""
 
-    @patch("hermit.ingestion.scanner.qdrant")
+    @patch("hermit.ingestion.scanner.lance")
     @patch("hermit.ingestion.scanner.MetadataStore")
     @patch("hermit.ingestion.scanner.scan_folder")
-    def test_rebuild_deletes_and_rescans(self, mock_scan, mock_meta_cls, mock_qdrant):
+    def test_rebuild_deletes_and_rescans(self, mock_scan, mock_meta_cls, mock_lance):
         from hermit.ingestion.scanner import rebuild_collection
 
         mock_meta_instance = MagicMock()
@@ -136,7 +116,7 @@ class TestRebuildCollection:
 
         result = rebuild_collection("test_col", "/tmp/docs")
 
-        mock_qdrant.delete_collection.assert_called_once_with("test_col")
+        mock_lance.delete_collection.assert_called_once_with("test_col")
         mock_meta_instance.destroy.assert_called_once()
         mock_scan.assert_called_once_with(
             "test_col", "/tmp/docs",

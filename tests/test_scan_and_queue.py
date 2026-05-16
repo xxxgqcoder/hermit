@@ -53,7 +53,7 @@ def test_registry_unregister_missing(tmp_data_root):
 
 @pytest.fixture
 def scan_env(tmp_path):
-    """Set up a temp folder with files, mock qdrant/embedder/metadata."""
+    """Set up a temp folder with files, mock lance/embedder/metadata."""
     folder = tmp_path / "docs"
     folder.mkdir()
     (folder / "a.md").write_text("hello world")
@@ -61,9 +61,9 @@ def scan_env(tmp_path):
     return folder
 
 
-@patch("hermit.ingestion.scanner.qdrant")
+@patch("hermit.ingestion.scanner.lance")
 @patch("hermit.ingestion.scanner.enqueue_index_task")
-def test_scan_folder_deferred_new_files(mock_enqueue, mock_qdrant, scan_env, tmp_path, monkeypatch):
+def test_scan_folder_deferred_new_files(mock_enqueue, mock_lance, scan_env, tmp_path, monkeypatch):
     """New files on disk should be enqueued when defer_indexing=True."""
     mock_enqueue.return_value = True
 
@@ -84,12 +84,12 @@ def test_scan_folder_deferred_new_files(mock_enqueue, mock_qdrant, scan_env, tmp
     assert stats["updated"] == 0
     assert mock_enqueue.call_count == 2
     # qdrant.delete_by_source_file should NOT be called for new files
-    mock_qdrant.delete_by_source_file.assert_not_called()
+    mock_lance.delete_by_source_file.assert_not_called()
 
 
-@patch("hermit.ingestion.scanner.qdrant")
+@patch("hermit.ingestion.scanner.lance")
 @patch("hermit.ingestion.scanner.enqueue_index_task")
-def test_scan_folder_deletion(mock_enqueue, mock_qdrant, scan_env, tmp_path, monkeypatch):
+def test_scan_folder_deletion(mock_enqueue, mock_lance, scan_env, tmp_path, monkeypatch):
     """Files in SQLite but missing from disk should be deleted immediately."""
     gone_path = str(scan_env / "gone.md")  # does not exist on disk
 
@@ -107,13 +107,13 @@ def test_scan_folder_deletion(mock_enqueue, mock_qdrant, scan_env, tmp_path, mon
     stats = scan_folder("test", str(scan_env), defer_indexing=True)
 
     assert stats["deleted"] == 1
-    mock_qdrant.delete_by_source_file.assert_any_call("test", gone_path)
+    mock_lance.delete_by_source_file.assert_any_call("test", gone_path)
     mock_meta.delete.assert_any_call(gone_path)
 
 
-@patch("hermit.ingestion.scanner.qdrant")
+@patch("hermit.ingestion.scanner.lance")
 @patch("hermit.ingestion.scanner.enqueue_index_task")
-def test_scan_folder_hash_unchanged_skips(mock_enqueue, mock_qdrant, scan_env, tmp_path, monkeypatch):
+def test_scan_folder_hash_unchanged_skips(mock_enqueue, mock_lance, scan_env, tmp_path, monkeypatch):
     """Files with unchanged hash should not be enqueued or re-indexed."""
     from hermit.ingestion.scanner import _file_hash
 
@@ -142,9 +142,9 @@ def test_scan_folder_hash_unchanged_skips(mock_enqueue, mock_qdrant, scan_env, t
     mock_enqueue.assert_not_called()
 
 
-@patch("hermit.ingestion.scanner.qdrant")
+@patch("hermit.ingestion.scanner.lance")
 @patch("hermit.ingestion.scanner.enqueue_index_task")
-def test_scan_folder_hash_changed_enqueues(mock_enqueue, mock_qdrant, scan_env, tmp_path, monkeypatch):
+def test_scan_folder_hash_changed_enqueues(mock_enqueue, mock_lance, scan_env, tmp_path, monkeypatch):
     """Files with changed hash should be enqueued for re-indexing."""
     mock_enqueue.return_value = True
     a_path = str(scan_env / "a.md")
@@ -168,9 +168,9 @@ def test_scan_folder_hash_changed_enqueues(mock_enqueue, mock_qdrant, scan_env, 
     assert mock_enqueue.call_count == 2
 
 
-@patch("hermit.ingestion.scanner.qdrant")
+@patch("hermit.ingestion.scanner.lance")
 @patch("hermit.ingestion.scanner._index_file")
-def test_scan_folder_sync_mode(mock_index, mock_qdrant, scan_env, tmp_path, monkeypatch):
+def test_scan_folder_sync_mode(mock_index, mock_lance, scan_env, tmp_path, monkeypatch):
     """When defer_indexing=False, _index_file should be called directly."""
     mock_index.return_value = True
 
@@ -240,9 +240,9 @@ def test_collect_files_ignore_both(tmp_path):
     assert names == {"a.md", "b.txt"}
 
 
-@patch("hermit.ingestion.scanner.qdrant")
+@patch("hermit.ingestion.scanner.lance")
 @patch("hermit.ingestion.scanner.enqueue_index_task")
-def test_scan_folder_with_ignore(mock_enqueue, mock_qdrant, tmp_path, monkeypatch):
+def test_scan_folder_with_ignore(mock_enqueue, mock_lance, tmp_path, monkeypatch):
     """scan_folder should skip files matching ignore rules."""
     folder = tmp_path / "docs"
     folder.mkdir()
@@ -270,9 +270,9 @@ def test_scan_folder_with_ignore(mock_enqueue, mock_qdrant, tmp_path, monkeypatc
 
 
 
-@patch("hermit.ingestion.scanner.qdrant")
+@patch("hermit.ingestion.scanner.lance")
 @patch("hermit.ingestion.scanner.enqueue_index_task")
-def test_scan_folder_ignores_symlinks(mock_enqueue, mock_qdrant, scan_env, monkeypatch):
+def test_scan_folder_ignores_symlinks(mock_enqueue, mock_lance, scan_env, monkeypatch):
     """Files symlinks and directory symlinks should be ignored."""
     mock_enqueue.return_value = True
 

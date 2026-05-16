@@ -1,7 +1,7 @@
-"""Unit tests for the on-disk embedding cache.
+"""Unit tests for the on-disk dense embedding cache.
 
-Fully offline — no model loads, no Docker, no Qdrant. Each test gets its
-own ``tmp_path`` cache root via monkeypatch so they don't share state.
+Fully offline — no model loads, no storage. Each test gets its own
+``tmp_path`` cache root via monkeypatch so they don't share state.
 """
 
 from __future__ import annotations
@@ -31,9 +31,8 @@ def cache_module(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CACHE_ROOT", tmp_path / "cache")
     monkeypatch.setattr(ec, "CACHE_ROOT", tmp_path / "cache")
 
-    # Use realistic model names so the model-namespace path is exercised
+    # Use a realistic model name so the model-namespace path is exercised
     monkeypatch.setattr(ec, "_dense_model_name", "test-dense-model")
-    monkeypatch.setattr(ec, "_sparse_model_name", "test-sparse-model")
 
     yield ec
 
@@ -111,56 +110,6 @@ def test_dense_store_rejects_invalid_input(cache_module):
     ec.store_dense("good", v)
     results, _ = ec.lookup_dense(["good"])
     assert results == [v]
-
-
-# ── Sparse ───────────────────────────────────────────────────────
-
-
-def test_sparse_roundtrip(cache_module):
-    ec = cache_module
-
-    indices = [1, 42, 100]
-    values = [0.3, 0.7, 0.5]
-    ec.store_sparse("doc-1", indices, values)
-
-    results, miss = ec.lookup_sparse(["doc-1"])
-    assert miss == []
-    sv = results[0]
-    assert sv is not None
-    # Duck-typed compatibility with fastembed sparse output
-    assert isinstance(sv.indices, np.ndarray)
-    assert isinstance(sv.values, np.ndarray)
-    assert sv.indices.tolist() == indices
-    assert sv.values.tolist() == pytest.approx(values)
-
-
-def test_sparse_dimension_validation_inconsistent_lengths(cache_module):
-    """Inconsistent indices/values lengths in the cached payload are treated as miss."""
-    ec = cache_module
-
-    # Inject a malformed entry directly to bypass store_sparse's own guard
-    cache = ec._sparse_cache_ref()
-    cache.set(
-        ec._key(ec._sparse_model_name, "bad"),
-        ([1, 2, 3], [0.1, 0.2]),  # 3 indices, 2 values
-    )
-
-    results, miss = ec.lookup_sparse(["bad"])
-    assert results == [None]
-    assert miss == [0]
-
-
-def test_sparse_store_rejects_inconsistent_lengths(cache_module):
-    """store_sparse() drops mismatched indices/values rather than poisoning the cache."""
-    ec = cache_module
-
-    ec.store_sparse("mismatch", [1, 2, 3], [0.1, 0.2])  # wrong → no-op
-    results, _ = ec.lookup_sparse(["mismatch"])
-    assert results == [None]
-
-    ec.store_sparse("empty", [], [])  # empty also rejected
-    results, _ = ec.lookup_sparse(["empty"])
-    assert results == [None]
 
 
 # ── Behaviour switches ───────────────────────────────────────────

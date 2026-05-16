@@ -1,8 +1,7 @@
 import json
 import logging
-from pathlib import Path
 
-from hermit.config import DATA_ROOT, DENSE_MODEL, SPARSE_MODEL
+from hermit.config import DATA_ROOT, DENSE_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +11,6 @@ _SIGNATURE_PATH = DATA_ROOT / "model_signature.json"
 def _current_signature() -> dict[str, str]:
     return {
         "dense_model": DENSE_MODEL,
-        "sparse_model": SPARSE_MODEL,
     }
 
 
