@@ -66,16 +66,6 @@ async def lifespan(app: FastAPI):
     reranker.start_idle_unloader()
     start_task_worker()
 
-    # In standalone mode, initialise the Qdrant connection eagerly so that
-    # any Docker image pull or container startup happens here — with clear
-    # log output — rather than silently inside the first collection scan.
-    from hermit.config import QDRANT_HOST
-    if QDRANT_HOST:
-        logger.info("Standalone 模式：提前初始化 Qdrant 连接 (%s)...", QDRANT_HOST)
-        from hermit.storage.qdrant import client as _qdrant_client
-        _qdrant_client()  # triggers ensure_qdrant_running + image pull if needed
-        logger.info("Qdrant 连接已就绪。")
-
     # Check if embedding models changed since last run
     from hermit.storage.model_signature import check_model_changed, save_signature
     model_changed, old_sig, new_sig = check_model_changed()
@@ -85,26 +75,6 @@ async def lifespan(app: FastAPI):
             "All collections will be re-indexed in background.",
             old_sig, new_sig,
         )
-
-    # Check if the Qdrant deployment mode changed since last run.
-    # The embedded qdrant-client (local) and the Rust qdrant-server
-    # (standalone) use incompatible on-disk layouts, so a switch in
-    # either direction must trigger a full re-index — otherwise the
-    # new engine sees an empty store while Hermit's metadata still
-    # claims N indexed files.
-    from hermit.storage.qdrant_mode_signature import (
-        check_mode_changed, save_mode,
-    )
-    mode_changed, old_mode, new_mode = check_mode_changed(QDRANT_HOST)
-    if mode_changed:
-        logger.warning(
-            "Qdrant deployment mode change detected! Old: %s, New: %s. "
-            "All collections will be re-indexed in background "
-            "(local and standalone engines use incompatible on-disk formats).",
-            old_mode, new_mode,
-        )
-
-    needs_rebuild = model_changed or mode_changed
 
     # Reload persisted collections and run startup scan
     from hermit.storage.registry import get_all
@@ -117,11 +87,10 @@ async def lifespan(app: FastAPI):
         ig_pat = cfg.get("ignore_patterns", [])
         ig_ext = cfg.get("ignore_extensions", [])
         try:
-            if needs_rebuild:
-                reason = "model change" if model_changed else f"mode change ({old_mode} → {new_mode})"
+            if model_changed:
                 logger.warning(
-                    "Queuing full re-index for collection '%s' due to %s.",
-                    name, reason,
+                    "Queuing full re-index for collection '%s' due to model change.",
+                    name,
                 )
                 rebuild_collection(
                     name,
@@ -145,13 +114,9 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed to restore collection '%s'", name)
 
-    # Save current signatures after successful startup
     if model_changed:
         save_signature()
         logger.info("Model signature updated.")
-    if mode_changed:
-        save_mode(new_mode)
-        logger.info("Qdrant mode signature updated to '%s'.", new_mode)
 
     _server_ready = True
     logger.info("Hermit ready.")
@@ -159,14 +124,6 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Hermit.")
     if _search_executor:
         _search_executor.shutdown(wait=False)
-    # Explicitly stop the managed Qdrant container during graceful shutdown.
-    # This is more reliable than atexit (which is skipped on SIGKILL) and
-    # fires deterministically as part of the ASGI lifespan shutdown event.
-    from hermit.config import QDRANT_HOST, QDRANT_MANAGED
-    if QDRANT_HOST and QDRANT_MANAGED:
-        from hermit.config import QDRANT_CONTAINER_NAME
-        from hermit.storage.qdrant_docker import stop_qdrant_container
-        stop_qdrant_container(QDRANT_CONTAINER_NAME)
 
 
 app = FastAPI(title="Hermit", version="0.1.0", lifespan=lifespan)

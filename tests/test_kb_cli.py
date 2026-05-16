@@ -413,7 +413,7 @@ def test_kb_remove(cli_env, tmp_path, capsys, monkeypatch):
 
     monkeypatch.setattr("hermit.storage.metadata.MetadataStore", FakeMetadataStore)
     monkeypatch.setattr(
-        "hermit.storage.qdrant.delete_collection",
+        "hermit.storage.lance.delete_collection",
         lambda name: mock_deleted_collections.append(name),
     )
     monkeypatch.setattr("hermit.cli._read_pid", lambda: None)
@@ -492,7 +492,7 @@ def test_kb_remove_falls_back_to_local_when_api_collection_missing(
 
     monkeypatch.setattr("hermit.storage.metadata.MetadataStore", FakeMetadataStore)
     monkeypatch.setattr(
-        "hermit.storage.qdrant.delete_collection",
+        "hermit.storage.lance.delete_collection",
         lambda name: mock_deleted_collections.append(name),
     )
     monkeypatch.setattr("hermit.cli._read_pid", lambda: None)

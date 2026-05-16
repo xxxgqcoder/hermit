@@ -11,10 +11,9 @@ It is designed for local-first workflows and works well as a lightweight retriev
 - **Runs fully locally**: models, vector data, and metadata live inside the project
 - **Semantic Markdown chunking**: a state-machine parser splits `.md` files into 11 semantically coherent block types (headings, fenced code, math, tables, blockquotes, lists, …) before chunking — code blocks and tables are never split mid-content
 - **Heading-aware sliding window**: chunks always start at a section heading when possible, so each retrieved chunk is self-contained and retrieval-friendly even without surrounding context
-- **Dual Vector Storage Modes**: Automatically handles both local (embedded) and standalone (Docker-based) Qdrant backends.
-- **Multi-threaded Search Acceleration**: Bypasses GIL with ONNX-based reranking using a dedicated thread pool, achieving ~3x throughput improvement.
+- **Embedded vector store**: LanceDB columnar storage, no Docker, no external server
 - **Multi-collection support**: one folder maps to one collection
-- **Hybrid retrieval**: dense + sparse recall
+- **Hybrid retrieval**: dense vectors + tantivy FTS (BM25) fused via RRF
 - **Reranking**: a cross-encoder reranks the fused candidates
 - **Incremental sync**: startup scan plus periodic polling
 - **CPU-friendly**: built on `fastembed` + ONNX Runtime, no GPU required
@@ -35,11 +34,10 @@ The current implementation reads files as text using `UTF-8` with replacement on
 
 Hermit uses the following search flow:
 
-1. Encode the query into dense and sparse representations
-2. Run hybrid retrieval in Qdrant
-3. Fuse candidates with RRF
-4. Rerank the candidate set
-5. Return the top matching chunks
+1. Encode the query into a dense vector
+2. Run hybrid retrieval in LanceDB (vector + tantivy FTS) with RRF fusion
+3. Rerank the candidate set with a cross-encoder
+4. Return the top matching chunks
 
 ### Indexing pipeline
 
@@ -48,8 +46,8 @@ Each registered folder goes through:
 1. startup scan
 2. SQLite metadata diffing
 3. text chunking (see below)
-4. embedding generation
-5. Qdrant upsert
+4. dense embedding generation
+5. LanceDB upsert (FTS index updates automatically)
 6. ongoing periodic polling
 
 ### Markdown semantic chunking
@@ -88,8 +86,6 @@ See [docs/markdown-chunking.md](docs/markdown-chunking.md) for the full design.
 - Chunk size: `256` tokens (using the embedding model's tokenizer)
 - Chunk overlap: `32` tokens
 - Search `top_k`: `5`
-- Default `w_dense`: `0.7`
-- Default `w_sparse`: `0.3`
 - Default rerank candidates: `20`
 - Max collections: `4`
 - Max collection name length: `64`
@@ -98,7 +94,7 @@ See [docs/markdown-chunking.md](docs/markdown-chunking.md) for the full design.
 ## Tech stack
 
 - **API framework**: FastAPI
-- **Vector database**: Qdrant (Dual-mode: Embedded or Standalone Docker)
+- **Vector database**: LanceDB (embedded, columnar, tantivy FTS)
 - **Inference backend**: fastembed (ONNX-based, parallelized via `ThreadPoolExecutor`)
 - **Metadata store**: SQLite
 - **Filesystem watcher**: periodic polling
@@ -106,20 +102,11 @@ See [docs/markdown-chunking.md](docs/markdown-chunking.md) for the full design.
 Current models:
 
 - Dense embedding: `jinaai/jina-embeddings-v2-base-zh`
-- Sparse embedding: `Qdrant/bm25`
 - Reranker: `jinaai/jina-reranker-v2-base-multilingual`
 
-## Vector Storage Modes
-
-Hermit automatically detects the environment and switches between two modes:
-
-1. **Local Mode (Default)**: Uses Qdrant's embedded client. Data is stored in `data/qdrant/`. Ideal for zero-configuration local use.
-2. **Standalone Mode**: If `QDRANT_HOST` is set (e.g., `QDRANT_HOST=localhost`), Hermit will manage a Qdrant Docker container automatically. This mode is faster for large-scale indexing and supports better persistent management.
-
-To force standalone mode, start Hermit with:
-```bash
-QDRANT_HOST=localhost hermit start
-```
+Keyword recall is provided by LanceDB's tantivy FTS index — no separate
+sparse embedding model is loaded. See [docs/lancedb.md](docs/lancedb.md)
+for the storage layout, index strategy, and query semantics.
 
 ## Performance & Memory
 
@@ -127,7 +114,7 @@ Hermit is optimized for stable local search memory usage:
 - **Serialized Search**: Search requests run through a single-worker executor. This keeps the shared ONNX sessions from serving multiple reranker requests concurrently.
 - **Bounded ONNX Inference**: Uses `HERMIT_ONNX_THREADS=2` by default to keep ONNX Runtime per-thread arenas small. Raise it only after measuring that latency improves enough to justify the extra resident memory.
 - **Smaller Rerank Pool**: Uses 20 candidates per query by default while keeping cross-encoder reranking enabled.
-- **Embedding Cache**: Indexing skips ONNX inference for chunks whose exact model input was seen before. Vectors are cached on disk (`HERMIT_HOME/cache`, sha256-keyed by `model_name::input_text`) with a 7-day TTL. Cache hits validate the vector dimension and fall back to a fresh embed on mismatch — model upgrades or partially-corrupted entries are self-healing. Always on by design; the cache is bounded and self-reaping.
+- **Embedding Cache**: Indexing skips ONNX inference for chunks whose exact model input was seen before. Dense vectors are cached on disk (`HERMIT_HOME/cache/dense`, sha256-keyed by `model_name::input_text`) with a 7-day TTL. Cache hits validate the vector dimension and fall back to a fresh embed on mismatch — model upgrades or partially-corrupted entries are self-healing. Always on by design; the cache is bounded and self-reaping.
 
 ## Project layout
 
@@ -138,8 +125,8 @@ Hermit is optimized for stable local search memory usage:
 ├── README.md / README_cn.md
 ├── docs/
 │   ├── design.md
+│   ├── lancedb.md
 │   ├── markdown-chunking.md
-│   ├── qdrant_standalone.md
 │   └── skill-distribution.md
 ├── hermit/
 │   ├── app.py                 # FastAPI app + lifespan
@@ -156,24 +143,22 @@ Hermit is optimized for stable local search memory usage:
 │   │   └── watcher.py
 │   ├── retrieval/
 │   │   ├── embedder.py
-│   │   ├── embed_cache.py     # diskcache-backed per-model embedding cache
+│   │   ├── embed_cache.py     # diskcache-backed dense embedding cache
 │   │   ├── reranker.py
 │   │   └── searcher.py
 │   └── storage/
+│       ├── lance.py           # LanceDB-backed vector store
 │       ├── metadata.py        # SQLite per-collection
 │       ├── model_signature.py
-│       ├── qdrant.py
-│       ├── qdrant_docker.py   # Stand-alone container lifecycle
-│       ├── qdrant_mode_signature.py
 │       ├── quantizer.py       # INT8 quantization for dense embedder
 │       └── registry.py
 └── tests/
 
 ~/.hermit/                     # runtime data (override with HERMIT_HOME)
 ├── models/                    # ONNX weights (fastembed cache)
-├── cache/{dense,sparse}/      # embedding cache (sha256-keyed, 7-day TTL)
+├── cache/dense/               # dense embedding cache (sha256-keyed, 7-day TTL)
 ├── data/
-│   ├── qdrant/                # Qdrant storage (shared between local / standalone)
+│   ├── lance/                 # LanceDB tables (one per collection)
 │   ├── metadata/              # SQLite per-collection
 │   ├── collections.json       # registry
 │   └── model_signature.json
@@ -263,8 +248,7 @@ Collection naming rules:
 ### 3. Start the service
 
 ```bash
-hermit start                          # local (embedded Qdrant)
-QDRANT_HOST=localhost hermit start    # stand-alone (Qdrant Docker, recommended)
+hermit start
 ```
 
 On startup, Hermit will:
@@ -294,7 +278,7 @@ CLI (recommended — JSON output, no curl glue needed):
 
 ```bash
 hermit search my_docs "two sum approach"
-hermit search my_docs "Qdrant" --mode keyword           # BM25 only, faster
+hermit search my_docs "lancedb" --mode keyword          # FTS only, faster
 hermit search my_docs "binary"  --mode fuzzy            # substring scan
 hermit search my_docs "design"  --mode fuzzy --filename "*.md"
 hermit search my_docs "embedding" --no-rerank --top-k 3
@@ -324,7 +308,7 @@ All commands output JSON to stdout. Add `--pretty` for indented output. Errors a
 
 | Command | Purpose |
 |---|---|
-| `hermit start` | Start the server in background (uvicorn daemon). Set `QDRANT_HOST=localhost` to run in stand-alone mode. |
+| `hermit start` | Start the server in background (uvicorn daemon). |
 | `hermit stop` | Graceful shutdown (SIGTERM, falls back to SIGKILL after 10s). |
 | `hermit status` | Health JSON: mode, uptime, collections, pending tasks. |
 | `hermit logs` | Tail `~/.hermit/logs/hermit.log` (streaming, not JSON). |
@@ -453,7 +437,7 @@ Returns `409` if the name already exists, `400` for invalid name or folder path.
 
 ### `DELETE /collections/{name}`
 
-Remove a collection: stop the watcher, drain its task queue, drop the Qdrant collection, delete the SQLite metadata DB, and unregister.
+Remove a collection: stop the watcher, drain its task queue, drop the LanceDB table, delete the SQLite metadata DB, and unregister.
 
 Returns `409` if background indexing tasks for that collection cannot drain within 30s — retry shortly.
 
@@ -480,18 +464,17 @@ Response fields:
 - `models_loaded` — whether embedding/reranker models are loaded
 - `collections` — list of `{name, indexed_files, total_chunks}` per collection
 - `pending_index_tasks` — total background indexing tasks waiting across all collections
-- `qdrant_mode` — `"local"` (embedded) or `"standalone"` (external Qdrant server)
-- `qdrant_host` — host address in standalone mode; `null` in local mode
+- `storage` — always `"lance"` (LanceDB-backed embedded store)
 
 ## Storage layout
 
 Hermit keeps all runtime data under `~/.hermit/` by default (override with `HERMIT_HOME` env var):
 
 - `~/.hermit/models/`: local model cache (fastembed ONNX weights)
-- `~/.hermit/data/qdrant/`: Qdrant storage — same path is used by both local and stand-alone modes
+- `~/.hermit/data/lance/`: LanceDB tables — one per collection
 - `~/.hermit/data/metadata/`: one SQLite database per collection
 - `~/.hermit/data/collections.json`: persisted collection configuration
-- `~/.hermit/cache/dense/` and `~/.hermit/cache/sparse/`: embedding cache (sha256-keyed, 7-day TTL)
+- `~/.hermit/cache/dense/`: dense embedding cache (sha256-keyed, 7-day TTL)
 - `~/.hermit/logs/hermit.log`: server log
 - `~/.hermit/hermit.pid` and `~/.hermit/port.json`: daemon bookkeeping
 
@@ -513,7 +496,7 @@ During scanning it handles:
 
 - **new files**: enqueue or index them
 - **modified files**: rechunk, re-embed, and replace old chunks
-- **deleted files**: remove them from Qdrant and SQLite
+- **deleted files**: remove them from LanceDB and SQLite
 
 ### Chunking rules
 
@@ -524,7 +507,7 @@ During scanning it handles:
 
 ## Known limitations
 
-- `w_dense` and `w_sparse` are accepted by the API, but the current implementation uses **RRF fusion** rather than explicit weighted score fusion
+- Hybrid fusion uses LanceDB's built-in RRF reranker; explicit `w_dense`/`w_sparse` knobs are no longer exposed
 - all files are treated as text; PDF, image, and Office parsing are out of scope
 - the maximum number of collections is currently `4`
 - first-time model downloads may take a while and use noticeable disk space

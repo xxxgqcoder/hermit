@@ -9,7 +9,6 @@ Provides:
 import json
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -22,12 +21,6 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_MODEL_ROOT = Path.home() / ".hermit" / "models"
 
-
-def _free_port() -> int:
-    """Ask the OS to allocate a free TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
 
 
 # ── helpers ─────────────────────────────────────────────────────
@@ -145,12 +138,6 @@ def hermit_env(tmp_path):
     env = os.environ.copy()
     env["HERMIT_HOME"] = str(hermit_home)
     env["HERMIT_START_TIMEOUT"] = "120"
-    # Set QDRANT_PORT/GRPC_PORT to free ports so _check_no_qdrant_service()
-    # doesn't clash with any real Qdrant service running on the host (e.g. 6333).
-    # In local (embedded) mode these ports are never actually used; they only
-    # appear in the safeguard check.
-    env["QDRANT_PORT"] = str(_free_port())
-    env["QDRANT_GRPC_PORT"] = str(_free_port())
 
     yield {"env": env, "hermit_home": hermit_home}
 

@@ -1,13 +1,11 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, model_validator
 
 from hermit.config import (
     DEFAULT_RERANK_CANDIDATES,
     DEFAULT_SEARCH_MODE,
     DEFAULT_TOP_K,
-    DEFAULT_W_DENSE,
-    DEFAULT_W_SPARSE,
 )
 
 
@@ -18,8 +16,6 @@ class SearchRequest(BaseModel):
     query: str = ""
     collection: str
     top_k: int = DEFAULT_TOP_K
-    w_dense: float = Field(DEFAULT_W_DENSE, ge=0, le=1)
-    w_sparse: float = Field(DEFAULT_W_SPARSE, ge=0, le=1)
     rerank_candidates: int = DEFAULT_RERANK_CANDIDATES
     mode: SearchMode = DEFAULT_SEARCH_MODE
     # Substring or glob (`*`/`?`) match against the filename stem (basename
@@ -109,5 +105,4 @@ class HealthResponse(BaseModel):
     models_loaded: bool
     collections: list[HealthCollectionInfo]
     pending_index_tasks: int
-    qdrant_mode: str  # "local" or "standalone"
-    qdrant_host: str | None  # None in local mode
+    storage: str  # always "lance"

@@ -8,8 +8,7 @@ from hermit.ingestion.chunker import chunk_text, chunk_markdown
 from hermit.ingestion.task_queue import enqueue_index_task
 from hermit.retrieval import embedder
 from hermit.storage.metadata import MetadataStore
-from hermit.storage import qdrant
-from hermit.storage.qdrant import CollectionCorruptedError
+from hermit.storage import lance
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +93,10 @@ def _index_file(
     embed_inputs = [f"[{title}]\n{chunk}" for chunk in chunks]
 
     dense_vectors = embedder.embed_dense(embed_inputs)
-    sparse_vectors = embedder.embed_sparse(embed_inputs)
 
     ids = [str(uuid.uuid4()) for _ in chunks]
-    # `title` keeps the original case for embedding prefix; `filename` is the
-    # lowercase stem indexed for substring search via Qdrant TEXT MatchText.
+    # `title` keeps the original case for the embedding prefix; `filename` is
+    # the lowercase stem stored for substring matching via LanceDB SQL.
     filename_token = title.lower()
     payloads = [
         {
@@ -112,19 +110,9 @@ def _index_file(
         for i, chunk in enumerate(chunks)
     ]
 
-    # Delete old + upsert new in a single lock acquisition
-    try:
-        qdrant.replace_file_chunks(
-            collection_name, fpath_str, ids, dense_vectors, sparse_vectors, payloads
-        )
-    except CollectionCorruptedError:
-        logger.warning(
-            "Collection '%s' was recreated due to data corruption; "
-            "clearing metadata so all files are re-indexed on next scan",
-            collection_name,
-        )
-        meta.destroy()
-        return False
+    lance.replace_file_chunks(
+        collection_name, fpath_str, ids, dense_vectors, payloads
+    )
 
     fhash = file_hash or _file_hash(file_path)
     fmtime = file_path.stat().st_mtime
@@ -149,7 +137,7 @@ def scan_folder(
     if not folder.is_dir():
         raise ValueError(f"Not a directory: {folder}")
 
-    qdrant.ensure_collection(collection_name)
+    lance.ensure_collection(collection_name)
     meta = MetadataStore(collection_name)
 
     # Step 1: Collect current disk files and indexed records
@@ -168,16 +156,7 @@ def scan_folder(
 
     # --- Handle deletions: indexed but file gone ---
     for fpath_str in to_delete:
-        try:
-            qdrant.delete_by_source_file(collection_name, fpath_str)
-        except CollectionCorruptedError:
-            logger.warning(
-                "Collection '%s' was recreated due to data corruption; "
-                "clearing metadata and aborting scan — re-scan to re-index all files",
-                collection_name,
-            )
-            meta.destroy()
-            return {"added": 0, "updated": 0, "deleted": 0, "corrupted": True}
+        lance.delete_by_source_file(collection_name, fpath_str)
         meta.delete(fpath_str)
         deleted += 1
         logger.info("Removed deleted file from index: %s", fpath_str)
@@ -224,7 +203,7 @@ def rebuild_collection(
 ):
     """Drop and recreate a collection, then re-index all files via task queue."""
     logger.info("Rebuilding index for collection '%s'...", collection_name)
-    qdrant.delete_collection(collection_name)
+    lance.delete_collection(collection_name)
     MetadataStore(collection_name).destroy()
     return scan_folder(
         collection_name,

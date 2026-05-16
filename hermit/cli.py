@@ -199,8 +199,6 @@ def cmd_start(_args):
     PID_FILE.write_text(str(proc.pid))
 
     # Wait for server to become ready.
-    # Default 300s: standalone mode may need to pull the Qdrant Docker image
-    # on first run, which can take several minutes on slow networks.
     # Override with HERMIT_START_TIMEOUT env var (seconds).
     start_timeout = int(os.environ.get("HERMIT_START_TIMEOUT", 300))
 
@@ -387,7 +385,7 @@ def cmd_kb_add(args):
 
 
 def _remove_collection_local(name: str) -> dict:
-    from hermit.storage import qdrant
+    from hermit.storage import lance
     from hermit.storage.metadata import MetadataStore
     from hermit.storage.registry import get_all, unregister
 
@@ -395,7 +393,7 @@ def _remove_collection_local(name: str) -> dict:
     if name not in existing:
         _error(f"collection '{name}' not found")
 
-    qdrant.delete_collection(name)
+    lance.delete_collection(name)
     MetadataStore(name).destroy()
     unregister(name)
     return {"status": "removed", "name": name}

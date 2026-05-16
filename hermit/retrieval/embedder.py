@@ -4,9 +4,9 @@ import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from queue import Queue, Empty
-from fastembed import TextEmbedding, SparseTextEmbedding
+from fastembed import TextEmbedding
 
-from hermit.config import MODEL_ROOT, DENSE_MODEL, SPARSE_MODEL, ONNX_THREADS
+from hermit.config import MODEL_ROOT, DENSE_MODEL, ONNX_THREADS
 from hermit.retrieval import embed_cache
 
 logger = logging.getLogger(__name__)
@@ -16,7 +16,6 @@ _BATCH_SIZE = 64       # max texts to accumulate before flushing
 _BATCH_TIMEOUT = 0.05  # seconds to wait for more texts before flushing
 
 _dense_model: TextEmbedding | None = None
-_sparse_model: SparseTextEmbedding | None = None
 _model_lock = threading.Lock()  # protects lazy model init only
 
 
@@ -50,20 +49,6 @@ def _get_dense_model() -> TextEmbedding:
                     )
                 logger.info("Dense embedding model loaded.")
     return _dense_model
-
-
-def _get_sparse_model() -> SparseTextEmbedding:
-    global _sparse_model
-    if _sparse_model is None:
-        with _model_lock:
-            if _sparse_model is None:
-                logger.info("Loading sparse embedding model: %s", SPARSE_MODEL)
-                _sparse_model = SparseTextEmbedding(
-                    model_name=SPARSE_MODEL,
-                    cache_dir=str(MODEL_ROOT),
-                )
-                logger.info("Sparse embedding model loaded.")
-    return _sparse_model
 
 
 # ── Batch embedding request ────────────────────────────────────
@@ -155,13 +140,7 @@ def _dense_embed_fn(texts: list[str]) -> list[list[float]]:
     return [e.tolist() for e in embeddings]
 
 
-def _sparse_embed_fn(texts: list[str]) -> list:
-    model = _get_sparse_model()
-    return list(model.embed(texts, batch_size=_BATCH_SIZE))
-
-
 _dense_scheduler = _EmbedScheduler("dense", _dense_embed_fn)
-_sparse_scheduler = _EmbedScheduler("sparse", _sparse_embed_fn)
 
 
 # ── Public API (index path — batched) ──────────────────────────
@@ -184,27 +163,6 @@ def embed_dense(texts: list[str]) -> list[list[float]]:
     return cached  # type: ignore[return-value]
 
 
-def embed_sparse(texts: list[str]) -> list:
-    """Submit texts for sparse embedding. Blocks until the batch is processed."""
-    cached, miss_idx = embed_cache.lookup_sparse(texts)
-    if not miss_idx:
-        return cached
-    miss_texts = [texts[i] for i in miss_idx]
-    _sparse_scheduler.start()
-    fresh = _sparse_scheduler.submit(miss_texts).result()
-    for slot, sv in zip(miss_idx, fresh):
-        cached[slot] = sv
-        # Persist as plain Python lists (numpy arrays don't survive
-        # diskcache's pickle roundtrip cleanly across versions).
-        try:
-            indices = sv.indices.tolist()
-            values = sv.values.tolist()
-        except AttributeError:  # pragma: no cover — fastembed shape changed
-            continue
-        embed_cache.store_sparse(texts[slot], indices, values)
-    return cached
-
-
 # ── Public API (query path — immediate, no batching) ───────────
 
 def embed_query_dense(query: str) -> list[float]:
@@ -212,27 +170,17 @@ def embed_query_dense(query: str) -> list[float]:
     return list(model.query_embed(query))[0].tolist()
 
 
-def embed_query_sparse(query: str):
-    model = _get_sparse_model()
-    return list(model.query_embed(query))[0]
-
-
 def warmup():
-    """Pre-load models, start scheduler threads, and run a dummy inference.
+    """Pre-load model, start scheduler thread, and run a dummy inference.
 
     Running a dummy embed call here triggers ONNX Runtime JIT graph compilation
     so that the first real indexing/search request is served at full speed.
     Without this, ONNX compilation happens on the first production call and can
     stall the worker for 30–90 s, causing indexing timeouts.
     """
-    logger.info("Warming up embedding models...")
+    logger.info("Warming up embedding model...")
     _get_dense_model()
-    _get_sparse_model()
     _dense_scheduler.start()
-    _sparse_scheduler.start()
-    # Trigger ONNX JIT compilation with a dummy pass so the server is truly
-    # ready for fast inference before reporting status == "ready".
     logger.info("Running dummy inference to compile ONNX graphs...")
     embed_dense(["warmup"])
-    embed_sparse(["warmup"])
-    logger.info("Embedding models ready.")
+    logger.info("Embedding model ready.")

@@ -23,7 +23,7 @@ from hermit.ingestion.task_queue import (
 )
 from hermit.ingestion.watcher import start_watching, stop_watching
 from hermit.retrieval.searcher import search
-from hermit.storage import qdrant
+from hermit.storage import lance
 from hermit.storage.metadata import MetadataStore
 from hermit.storage.registry import register, unregister
 
@@ -47,8 +47,6 @@ async def do_search(req: SearchRequest):
             collection_name=req.collection,
             query=req.query,
             top_k=req.top_k,
-            w_dense=req.w_dense,
-            w_sparse=req.w_sparse,
             rerank_candidates=req.rerank_candidates,
             mode=req.mode,
             filename=req.filename,
@@ -114,7 +112,7 @@ def add_collection(req: CollectionCreateRequest):
         _collections.pop(req.name, None)
         stop_watching(req.name)
         MetadataStore(req.name).destroy()
-        qdrant.delete_collection(req.name)
+        lance.delete_collection(req.name)
         unregister(req.name)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -160,15 +158,13 @@ def health():
         task_status = get_collection_task_status(name)
         total_pending += task_status["pending_tasks"]
 
-    from hermit.config import QDRANT_HOST
     return HealthResponse(
         status="ready" if state["ready"] else "starting",
         uptime=state["uptime"],
         models_loaded=state["ready"],
         collections=collections_info,
         pending_index_tasks=total_pending,
-        qdrant_mode="standalone" if QDRANT_HOST else "local",
-        qdrant_host=QDRANT_HOST,
+        storage="lance",
     )
 
 
@@ -199,7 +195,7 @@ def remove_collection(name: str):
                 ),
             )
 
-        qdrant.delete_collection(name)
+        lance.delete_collection(name)
         MetadataStore(name).destroy()
         unregister(name)
     except HTTPException:
