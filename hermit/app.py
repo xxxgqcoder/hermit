@@ -63,6 +63,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Hermit — loading models...")
     embedder.warmup()
     reranker.warmup()
+    reranker.start_idle_unloader()
     start_task_worker()
 
     # In standalone mode, initialise the Qdrant connection eagerly so that

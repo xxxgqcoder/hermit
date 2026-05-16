@@ -54,6 +54,17 @@ SPARSE_MODEL = "Qdrant/bm25"
 # Reranker model
 RERANKER_MODEL = "jinaai/jina-reranker-v2-base-multilingual"
 
+# Reranker idle unload — drop the in-memory TextCrossEncoder after this many
+# seconds without a request to release the ONNX Runtime arena (~2GB resident).
+# Next request lazily reloads at the cost of a one-time ~1-3s cold start.
+# Set to 0 (or negative) to disable.
+RERANKER_IDLE_TIMEOUT: int = int(os.environ.get("HERMIT_RERANKER_IDLE_TIMEOUT", 300))
+# How often the background thread wakes to check idleness. Lower bound on
+# unload latency past the timeout.
+RERANKER_IDLE_CHECK_INTERVAL: int = int(
+    os.environ.get("HERMIT_RERANKER_IDLE_CHECK_INTERVAL", 60),
+)
+
 # Maximum number of knowledge base collections
 MAX_COLLECTIONS = 4
 MAX_COLLECTION_NAME_LENGTH = 64
