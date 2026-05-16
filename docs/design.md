@@ -145,6 +145,17 @@ LanceDB 内部并行执行向量召回与 FTS 召回，再用 Reciprocal Rank Fu
 - Reranker 对候选集重新排序，返回排序后的 **索引列表**
 - 最终返回的 `score` 字段优先取 LanceDB 的 `_relevance_score`（hybrid + rerank 后的 RRF 分数），其次 `_distance` 或 `_score`
 
+### Idle Unload
+
+`TextCrossEncoder` 首次推理后 ONNX Runtime arena 会涨到 ~1 GB 并不归还给 OS，是稳态 RSS 单一最大头。`hermit/retrieval/reranker.py` 内置一个后台线程在 reranker 闲置超过 `HERMIT_RERANKER_IDLE_TIMEOUT`（默认 300s）后销毁实例并 `gc.collect()`，下次请求懒重载。
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `HERMIT_RERANKER_IDLE_TIMEOUT` | `300`（s） | 闲置阈值；设为 `0` 关闭闲置卸载 |
+| `HERMIT_RERANKER_IDLE_CHECK_INTERVAL` | `60`（s） | 后台检查频率 |
+
+实测（M5 Pro，本地 32k chunks 库）：闲置触发后 RSS 1925 → 824 MB（**-1101 MB 回收**），冷重载延迟 ~0.30s——远低于设计预期 1-3s。完整设计见 `design/reranker-idle-unload.md`。
+
 ---
 
 ## 模型管理
@@ -195,13 +206,13 @@ LanceDB 内部并行执行向量召回与 FTS 召回，再用 Reciprocal Rank Fu
 
 ## 内存预算（64GB）
 
-| 组件 | 实际占用 |
-|---|---|
-| jina-embeddings-v2-base-zh (Dense) | ~640MB |
-| jina-reranker-v2-base-multilingual (Reranker) | ~700MB（idle 后会被卸载，见 `design/reranker-idle-unload.md`） |
-| LanceDB（嵌入式） | ~50-200MB（取决于数据量） |
-| 系统 + FastAPI + ONNX Runtime | ~500MB |
-| **总计** | **~1.5-2GB** |
+| 组件 | 活跃时 | 闲置 ≥5 min |
+|---|---|---|
+| jina-embeddings-v2-base-zh (Dense) | ~640MB | ~640MB |
+| jina-reranker-v2-base-multilingual (Reranker + ONNX arena) | ~1.1GB | **0**（idle unload） |
+| LanceDB（嵌入式） | ~50-200MB | ~50-200MB |
+| 系统 + FastAPI + ONNX Runtime | ~500MB | ~500MB |
+| **总计 RSS** | **~2.3-2.5GB** | **~1.2-1.4GB** |
 
 远低于 64GB 上限，无内存压力。
 
