@@ -4,9 +4,13 @@ import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from queue import Queue, Empty
+
+# Patch fastembed before importing TextEmbedding so the model constructor can
+# accept enable_mem_pattern alongside enable_cpu_mem_arena.
+from hermit.retrieval import fastembed_patch  # noqa: F401  (import-for-side-effect)
 from fastembed import TextEmbedding
 
-from hermit.config import MODEL_ROOT, DENSE_MODEL, ONNX_THREADS
+from hermit.config import MODEL_ROOT, DENSE_MODEL, ONNX_ARENA, ONNX_THREADS
 from hermit.retrieval import embed_cache
 
 logger = logging.getLogger(__name__)
@@ -19,6 +23,12 @@ _dense_model: TextEmbedding | None = None
 _model_lock = threading.Lock()  # protects lazy model init only
 
 
+_ARENA_OPTS = {
+    "enable_cpu_mem_arena": ONNX_ARENA,
+    "enable_mem_pattern": ONNX_ARENA,
+}
+
+
 def _get_dense_model() -> TextEmbedding:
     global _dense_model
     if _dense_model is None:
@@ -28,24 +38,26 @@ def _get_dense_model() -> TextEmbedding:
                 if is_quantized(DENSE_MODEL):
                     q_dir = get_quantized_dir(DENSE_MODEL)
                     logger.info(
-                        "Loading quantized dense model from %s (threads=%d)",
-                        q_dir, ONNX_THREADS,
+                        "Loading quantized dense model from %s (threads=%d, arena=%s)",
+                        q_dir, ONNX_THREADS, ONNX_ARENA,
                     )
                     _dense_model = TextEmbedding(
                         model_name=DENSE_MODEL,
                         cache_dir=str(MODEL_ROOT),
                         threads=ONNX_THREADS,
                         specific_model_path=str(q_dir),
+                        **_ARENA_OPTS,
                     )
                 else:
                     logger.info(
-                        "Loading dense embedding model: %s (threads=%d)",
-                        DENSE_MODEL, ONNX_THREADS,
+                        "Loading dense embedding model: %s (threads=%d, arena=%s)",
+                        DENSE_MODEL, ONNX_THREADS, ONNX_ARENA,
                     )
                     _dense_model = TextEmbedding(
                         model_name=DENSE_MODEL,
                         cache_dir=str(MODEL_ROOT),
                         threads=ONNX_THREADS,
+                        **_ARENA_OPTS,
                     )
                 logger.info("Dense embedding model loaded.")
     return _dense_model

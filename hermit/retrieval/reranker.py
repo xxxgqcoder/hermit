@@ -3,10 +3,14 @@ import logging
 import threading
 import time
 
+# Patch fastembed before importing TextCrossEncoder so the constructor can
+# accept enable_mem_pattern alongside enable_cpu_mem_arena.
+from hermit.retrieval import fastembed_patch  # noqa: F401  (import-for-side-effect)
 from fastembed.rerank.cross_encoder import TextCrossEncoder
 
 from hermit.config import (
     MODEL_ROOT,
+    ONNX_ARENA,
     ONNX_THREADS,
     RERANKER_IDLE_CHECK_INTERVAL,
     RERANKER_IDLE_TIMEOUT,
@@ -22,28 +26,36 @@ _unloader_started = False
 _unloader_thread: threading.Thread | None = None
 
 
+_ARENA_OPTS = {
+    "enable_cpu_mem_arena": ONNX_ARENA,
+    "enable_mem_pattern": ONNX_ARENA,
+}
+
+
 def _build_reranker() -> TextCrossEncoder:
     from hermit.storage.quantizer import get_quantized_dir, is_quantized
     if is_quantized(RERANKER_MODEL):
         q_dir = get_quantized_dir(RERANKER_MODEL)
         logger.info(
-            "Loading quantized reranker model from %s (threads=%d)",
-            q_dir, ONNX_THREADS,
+            "Loading quantized reranker model from %s (threads=%d, arena=%s)",
+            q_dir, ONNX_THREADS, ONNX_ARENA,
         )
         return TextCrossEncoder(
             model_name=RERANKER_MODEL,
             cache_dir=str(MODEL_ROOT),
             threads=ONNX_THREADS,
             specific_model_path=str(q_dir),
+            **_ARENA_OPTS,
         )
     logger.info(
-        "Loading reranker model: %s (threads=%d)",
-        RERANKER_MODEL, ONNX_THREADS,
+        "Loading reranker model: %s (threads=%d, arena=%s)",
+        RERANKER_MODEL, ONNX_THREADS, ONNX_ARENA,
     )
     return TextCrossEncoder(
         model_name=RERANKER_MODEL,
         cache_dir=str(MODEL_ROOT),
         threads=ONNX_THREADS,
+        **_ARENA_OPTS,
     )
 
 
