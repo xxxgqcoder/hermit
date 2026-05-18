@@ -44,6 +44,17 @@ SEARCH_MODES = ("hybrid", "semantic", "keyword", "fuzzy")
 # you have measured single-request latency and accept the memory cost.
 ONNX_THREADS: int = int(os.environ.get("HERMIT_ONNX_THREADS", 2))
 
+# ONNX Runtime arena allocator control. Default OFF — without this, the dense
+# embedder and reranker both ratchet their MALLOC_LARGE high-water-mark up over
+# time and never give it back to the OS (only a full session destruction does,
+# which is what the reranker idle-unload exploits). Disabling the arena makes
+# each Run() allocate fresh through plain malloc — a few % slower per call,
+# but RSS stays flat across bursts and accumulating indexing runs.
+# See problems/concurrent-search-rss-blowup.md and
+# problems/dense-embedder-arena-creep.md for the motivating measurements.
+# Set HERMIT_ONNX_ARENA=true to re-enable the arena (old fastembed default).
+ONNX_ARENA: bool = os.environ.get("HERMIT_ONNX_ARENA", "false").lower() in {"1", "true", "yes"}
+
 # Embedding model (fastembed-supported). Keyword recall is handled by LanceDB's
 # tantivy FTS index, so no sparse model is needed.
 DENSE_MODEL = "jinaai/jina-embeddings-v2-base-zh"
