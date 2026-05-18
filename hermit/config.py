@@ -74,6 +74,17 @@ RERANKER_IDLE_CHECK_INTERVAL: int = int(
     os.environ.get("HERMIT_RERANKER_IDLE_CHECK_INTERVAL", 60),
 )
 
+# Dense embedder idle unload — same mechanism as reranker but with a longer
+# default threshold. Dense is touched by every search (query embed) and every
+# indexing batch, so a working session typically keeps it warm; the unload
+# fires across genuinely quiet stretches (overnight, between bursts of edits)
+# to reclaim the ~1-2GB activation pool that indexing accumulates. Cold start
+# is ~0.2-0.5s. Set to 0 (or negative) to disable.
+DENSE_IDLE_TIMEOUT: int = int(os.environ.get("HERMIT_DENSE_IDLE_TIMEOUT", 1800))
+DENSE_IDLE_CHECK_INTERVAL: int = int(
+    os.environ.get("HERMIT_DENSE_IDLE_CHECK_INTERVAL", 120),
+)
+
 # Maximum number of knowledge base collections
 MAX_COLLECTIONS = 4
 MAX_COLLECTION_NAME_LENGTH = 64

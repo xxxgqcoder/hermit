@@ -73,6 +73,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("Starting Hermit — loading models...")
     embedder.warmup()
+    embedder.start_idle_unloader()
     reranker.warmup()
     reranker.start_idle_unloader()
     start_task_worker()
