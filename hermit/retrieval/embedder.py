@@ -1,3 +1,4 @@
+import gc
 import logging
 import threading
 import time
@@ -10,7 +11,14 @@ from queue import Queue, Empty
 from hermit.retrieval import fastembed_patch  # noqa: F401  (import-for-side-effect)
 from fastembed import TextEmbedding
 
-from hermit.config import MODEL_ROOT, DENSE_MODEL, ONNX_ARENA, ONNX_THREADS
+from hermit.config import (
+    DENSE_IDLE_CHECK_INTERVAL,
+    DENSE_IDLE_TIMEOUT,
+    DENSE_MODEL,
+    MODEL_ROOT,
+    ONNX_ARENA,
+    ONNX_THREADS,
+)
 from hermit.retrieval import embed_cache
 
 logger = logging.getLogger(__name__)
@@ -20,7 +28,10 @@ _BATCH_SIZE = 64       # max texts to accumulate before flushing
 _BATCH_TIMEOUT = 0.05  # seconds to wait for more texts before flushing
 
 _dense_model: TextEmbedding | None = None
-_model_lock = threading.Lock()  # protects lazy model init only
+_model_lock = threading.Lock()  # protects model load / unload
+_last_use: float = 0.0
+_unloader_started = False
+_unloader_thread: threading.Thread | None = None
 
 
 _ARENA_OPTS = {
@@ -29,38 +40,45 @@ _ARENA_OPTS = {
 }
 
 
+def _build_dense_model() -> TextEmbedding:
+    from hermit.storage.quantizer import get_quantized_dir, is_quantized
+    if is_quantized(DENSE_MODEL):
+        q_dir = get_quantized_dir(DENSE_MODEL)
+        logger.info(
+            "Loading quantized dense model from %s (threads=%d, arena=%s)",
+            q_dir, ONNX_THREADS, ONNX_ARENA,
+        )
+        return TextEmbedding(
+            model_name=DENSE_MODEL,
+            cache_dir=str(MODEL_ROOT),
+            threads=ONNX_THREADS,
+            specific_model_path=str(q_dir),
+            **_ARENA_OPTS,
+        )
+    logger.info(
+        "Loading dense embedding model: %s (threads=%d, arena=%s)",
+        DENSE_MODEL, ONNX_THREADS, ONNX_ARENA,
+    )
+    return TextEmbedding(
+        model_name=DENSE_MODEL,
+        cache_dir=str(MODEL_ROOT),
+        threads=ONNX_THREADS,
+        **_ARENA_OPTS,
+    )
+
+
 def _get_dense_model() -> TextEmbedding:
-    global _dense_model
-    if _dense_model is None:
-        with _model_lock:
-            if _dense_model is None:
-                from hermit.storage.quantizer import get_quantized_dir, is_quantized
-                if is_quantized(DENSE_MODEL):
-                    q_dir = get_quantized_dir(DENSE_MODEL)
-                    logger.info(
-                        "Loading quantized dense model from %s (threads=%d, arena=%s)",
-                        q_dir, ONNX_THREADS, ONNX_ARENA,
-                    )
-                    _dense_model = TextEmbedding(
-                        model_name=DENSE_MODEL,
-                        cache_dir=str(MODEL_ROOT),
-                        threads=ONNX_THREADS,
-                        specific_model_path=str(q_dir),
-                        **_ARENA_OPTS,
-                    )
-                else:
-                    logger.info(
-                        "Loading dense embedding model: %s (threads=%d, arena=%s)",
-                        DENSE_MODEL, ONNX_THREADS, ONNX_ARENA,
-                    )
-                    _dense_model = TextEmbedding(
-                        model_name=DENSE_MODEL,
-                        cache_dir=str(MODEL_ROOT),
-                        threads=ONNX_THREADS,
-                        **_ARENA_OPTS,
-                    )
-                logger.info("Dense embedding model loaded.")
-    return _dense_model
+    global _dense_model, _last_use
+    with _model_lock:
+        if _dense_model is None:
+            t0 = time.monotonic()
+            _dense_model = _build_dense_model()
+            logger.info(
+                "Dense embedding model loaded (cold start %.2fs).",
+                time.monotonic() - t0,
+            )
+        _last_use = time.monotonic()
+        return _dense_model
 
 
 # ── Batch embedding request ────────────────────────────────────
@@ -172,6 +190,11 @@ def embed_dense(texts: list[str]) -> list[list[float]]:
     for slot, vec in zip(miss_idx, fresh):
         cached[slot] = vec
         embed_cache.store_dense(texts[slot], vec)
+    # Touch _last_use again after the batch — long indexing batches can run
+    # past the idle threshold; bumping here keeps the unloader from killing
+    # the session mid-flight.
+    global _last_use
+    _last_use = time.monotonic()
     return cached  # type: ignore[return-value]
 
 
@@ -179,7 +202,75 @@ def embed_dense(texts: list[str]) -> list[list[float]]:
 
 def embed_query_dense(query: str) -> list[float]:
     model = _get_dense_model()
-    return list(model.query_embed(query))[0].tolist()
+    result = list(model.query_embed(query))[0].tolist()
+    global _last_use
+    _last_use = time.monotonic()
+    return result
+
+
+# ── Idle unloader ──────────────────────────────────────────────
+
+
+def _unload_locked() -> bool:
+    """Drop the dense model reference and trigger GC. Caller must hold lock."""
+    global _dense_model
+    if _dense_model is None:
+        return False
+    _dense_model = None
+    gc.collect()
+    return True
+
+
+def _idle_unloader_loop():
+    while True:
+        time.sleep(DENSE_IDLE_CHECK_INTERVAL)
+        if DENSE_IDLE_TIMEOUT <= 0:
+            continue
+        with _model_lock:
+            if _dense_model is None:
+                continue
+            idle = time.monotonic() - _last_use
+            if idle <= DENSE_IDLE_TIMEOUT:
+                continue
+            logger.info(
+                "Dense model idle %.0fs (> %ds), unloading.",
+                idle, DENSE_IDLE_TIMEOUT,
+            )
+            _unload_locked()
+
+
+def start_idle_unloader():
+    """Spawn the background idle-unload thread once per process."""
+    global _unloader_started, _unloader_thread
+    if _unloader_started:
+        return
+    if DENSE_IDLE_TIMEOUT <= 0:
+        logger.info("Dense model idle unload disabled (timeout <= 0).")
+        _unloader_started = True
+        return
+    _unloader_thread = threading.Thread(
+        target=_idle_unloader_loop,
+        name="dense-idle-unloader",
+        daemon=True,
+    )
+    _unloader_thread.start()
+    _unloader_started = True
+    logger.info(
+        "Dense model idle unloader started (timeout=%ds, check=%ds).",
+        DENSE_IDLE_TIMEOUT, DENSE_IDLE_CHECK_INTERVAL,
+    )
+
+
+def is_loaded() -> bool:
+    """Return whether the dense model is currently resident."""
+    with _model_lock:
+        return _dense_model is not None
+
+
+def unload_now() -> bool:
+    """Force-unload the dense model immediately. Returns True if dropped."""
+    with _model_lock:
+        return _unload_locked()
 
 
 def warmup():
