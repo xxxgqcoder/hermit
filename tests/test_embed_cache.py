@@ -158,8 +158,8 @@ def test_model_namespace_isolates_entries(cache_module, monkeypatch):
     assert results == [v_a], "Original-model entry must still be intact"
 
 
-def test_default_ttl_is_seven_days():
-    """Sanity: the hard-coded default is what the design says (7 days)."""
+def test_default_ttl_is_thirty_days():
+    """Sanity: the hard-coded default is what the design says (30 days)."""
     from hermit.config import EMBED_CACHE_TTL_SECONDS
 
-    assert EMBED_CACHE_TTL_SECONDS == 7 * 86400
+    assert EMBED_CACHE_TTL_SECONDS == 30 * 86400

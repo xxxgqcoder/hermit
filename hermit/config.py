@@ -10,7 +10,7 @@ HERMIT_HOME = Path(os.environ.get("HERMIT_HOME", Path.home() / ".hermit"))
 # Model storage
 MODEL_ROOT = HERMIT_HOME / "models"
 
-# Data storage (Qdrant + SQLite)
+# Data storage (LanceDB + SQLite)
 DATA_ROOT = HERMIT_HOME / "data"
 
 # Logs
@@ -20,9 +20,9 @@ LOG_DIR = HERMIT_HOME / "logs"
 # passed to the model (title-prefixed chunk), namespaced by the model name so
 # model swaps don't poison the cache. Always on — there is no env kill-switch
 # by design; the cache is self-healing (dim/length validation on hit) and the
-# 7-day TTL ensures any pathological state is reaped automatically.
+# 30-day TTL ensures any pathological state is reaped automatically.
 CACHE_ROOT = HERMIT_HOME / "cache"
-EMBED_CACHE_TTL_SECONDS: int = 7 * 86400
+EMBED_CACHE_TTL_SECONDS: int = 30 * 86400
 
 # PID file for daemon management
 PID_FILE = HERMIT_HOME / "hermit.pid"

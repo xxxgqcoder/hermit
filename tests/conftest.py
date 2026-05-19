@@ -220,7 +220,7 @@ def test_docs_dir(tmp_path):
     )
     (docs / "faq.md").write_text(
         "# FAQ\n\nQ: How does hermit perform semantic search?\n"
-        "A: Hermit embeds documents with jina embeddings and stores them in Qdrant.\n"
+        "A: Hermit embeds documents with jina embeddings and stores them in LanceDB.\n"
     )
 
     return docs

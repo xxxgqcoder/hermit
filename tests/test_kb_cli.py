@@ -400,7 +400,7 @@ def test_kb_remove(cli_env, tmp_path, capsys, monkeypatch):
     test_dir = tmp_path / "docs"
     test_dir.mkdir()
 
-    # Patch cleanup helpers so the test doesn't need a real SQLite DB or Qdrant.
+    # Patch cleanup helpers so the test doesn't need a real SQLite DB or LanceDB.
     mock_destroyed = []
     mock_deleted_collections = []
 

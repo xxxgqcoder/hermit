@@ -114,7 +114,7 @@ Hermit is optimized for stable local search memory usage:
 - **Serialized Search**: Search requests run through a single-worker executor. This keeps the shared ONNX sessions from serving multiple reranker requests concurrently.
 - **Bounded ONNX Inference**: Uses `HERMIT_ONNX_THREADS=2` by default to keep ONNX Runtime per-thread arenas small. Raise it only after measuring that latency improves enough to justify the extra resident memory.
 - **Smaller Rerank Pool**: Uses 20 candidates per query by default while keeping cross-encoder reranking enabled.
-- **Embedding Cache**: Indexing skips ONNX inference for chunks whose exact model input was seen before. Dense vectors are cached on disk (`HERMIT_HOME/cache/dense`, sha256-keyed by `model_name::input_text`) with a 7-day TTL. Cache hits validate the vector dimension and fall back to a fresh embed on mismatch — model upgrades or partially-corrupted entries are self-healing. Always on by design; the cache is bounded and self-reaping.
+- **Embedding Cache**: Indexing skips ONNX inference for chunks whose exact model input was seen before. Dense vectors are cached on disk (`HERMIT_HOME/cache/dense`, sha256-keyed by `model_name::input_text`) with a 30-day TTL. Cache hits validate the vector dimension and fall back to a fresh embed on mismatch — model upgrades or partially-corrupted entries are self-healing. Always on by design; the cache is bounded and self-reaping.
 
 ## Project layout
 
@@ -156,7 +156,7 @@ Hermit is optimized for stable local search memory usage:
 
 ~/.hermit/                     # runtime data (override with HERMIT_HOME)
 ├── models/                    # ONNX weights (fastembed cache)
-├── cache/dense/               # dense embedding cache (sha256-keyed, 7-day TTL)
+├── cache/dense/               # dense embedding cache (sha256-keyed, 30-day TTL)
 ├── data/
 │   ├── lance/                 # LanceDB tables (one per collection)
 │   ├── metadata/              # SQLite per-collection
@@ -474,7 +474,7 @@ Hermit keeps all runtime data under `~/.hermit/` by default (override with `HERM
 - `~/.hermit/data/lance/`: LanceDB tables — one per collection
 - `~/.hermit/data/metadata/`: one SQLite database per collection
 - `~/.hermit/data/collections.json`: persisted collection configuration
-- `~/.hermit/cache/dense/`: dense embedding cache (sha256-keyed, 7-day TTL)
+- `~/.hermit/cache/dense/`: dense embedding cache (sha256-keyed, 30-day TTL)
 - `~/.hermit/logs/hermit.log`: server log
 - `~/.hermit/hermit.pid` and `~/.hermit/port.json`: daemon bookkeeping
 

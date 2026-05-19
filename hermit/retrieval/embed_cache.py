@@ -13,7 +13,7 @@ Cache key
 ``text`` is exactly the string passed to the embedding model — i.e. the
 title-prefixed chunk used in ``scanner._index_file`` (``[{title}]\\n{chunk}``).
 The model name is part of the key so swapping models naturally orphans
-old entries; the 7-day TTL then reaps them.
+old entries; the 30-day TTL then reaps them.
 
 Storage
 ───────
