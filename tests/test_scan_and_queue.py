@@ -83,7 +83,7 @@ def test_scan_folder_deferred_new_files(mock_enqueue, mock_lance, scan_env, tmp_
     assert stats["deleted"] == 0
     assert stats["updated"] == 0
     assert mock_enqueue.call_count == 2
-    # qdrant.delete_by_source_file should NOT be called for new files
+    # lance.delete_by_source_file should NOT be called for new files
     mock_lance.delete_by_source_file.assert_not_called()
 
 
