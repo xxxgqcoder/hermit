@@ -173,11 +173,25 @@ Hermit is optimized for stable local search memory usage:
 - Python `3.12 ~ 3.13`
 - macOS or Linux
 
-Using a virtual environment is recommended.
-
-### Install from source
+### Install as a CLI tool (recommended)
 
 ```bash
+uv tool install git+https://github.com/xxxgqcoder/hermit.git
+```
+
+This drops a `hermit` executable into `~/.local/bin/` with its own isolated environment — no venv to activate. To upgrade later: `uv tool install git+https://github.com/xxxgqcoder/hermit.git --force` (or `uv tool upgrade hermit`).
+
+After installing, deploy the bundled agent skill so Claude / other agents can discover Hermit automatically:
+
+```bash
+hermit install-skills
+```
+
+### Development install (from source)
+
+```bash
+git clone https://github.com/xxxgqcoder/hermit.git
+cd hermit
 python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
