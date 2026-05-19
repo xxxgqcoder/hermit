@@ -56,7 +56,7 @@ hermit download
 hermit start
 ```
 
-Hermit 使用嵌入式 **LanceDB** 作为向量存储，无需 Docker、无外部进程。启动时会预加载 dense embedding 和 reranker 模型；reranker 在闲置超过 5 分钟后会自动卸载以释放 ONNX arena（实测可回收 ~1.1 GB 常驻），下次请求懒重载（实测冷启 ~0.3-1s）。
+Hermit 使用嵌入式 **LanceDB** 作为向量存储，无需 Docker、无外部进程。启动时会预加载 dense embedding 和 reranker 模型；两者都带闲置自动卸载机制以释放 ONNX arena（实测 reranker 可回收 ~1.1 GB、dense ~0.6 GB 常驻），下次请求懒重载（冷启 ~0.3-1s）。默认阈值：reranker 5 分钟、dense 30 分钟。
 
 输出示例：`{"status": "started", "pid": 12345, "port": 8000}`
 
@@ -64,7 +64,11 @@ Hermit 使用嵌入式 **LanceDB** 作为向量存储，无需 Docker、无外�
 
 ### 2. 内存与并发策略
 
-Hermit 的搜索请求在服务端串行执行，不提供 `SEARCH_THREADS` 并发请求配置——这样避免多个请求同时占用共享 ONNX session 和 cross-encoder reranker，降低本地常驻和峰值内存。
+Hermit 的搜索请求**默认串行执行**——多个请求共享同一份 ONNX session 和 cross-encoder reranker，串行化能压住本地常驻和峰值内存。如需 deep-search 类工作流（一次 query 扇出多次召回），可通过 `HERMIT_SEARCH_WORKERS` 调大并发：
+
+```sh
+HERMIT_SEARCH_WORKERS=4 hermit start   # 默认 1（串行）；调大会按比例放大峰值内存
+```
 
 单次 ONNX 推理的内部线程数可通过 `HERMIT_ONNX_THREADS` 调整，默认 `2`（ONNX Runtime 每线程会保留独立 arena，调大主要换来内存膨胀，仅在测得延迟收益时再调大）：
 
@@ -72,11 +76,13 @@ Hermit 的搜索请求在服务端串行执行，不提供 `SEARCH_THREADS` 并�
 HERMIT_ONNX_THREADS=2 hermit start
 ```
 
-Reranker 闲置卸载阈值可通过环境变量微调：
+模型闲置卸载阈值可通过环境变量微调（设为 `0` 关闭对应模型的闲置卸载）：
 
 ```sh
-HERMIT_RERANKER_IDLE_TIMEOUT=300       # 默认 300s；设为 0 关闭闲置卸载
-HERMIT_RERANKER_IDLE_CHECK_INTERVAL=60 # 后台检查频率，默认 60s
+HERMIT_RERANKER_IDLE_TIMEOUT=300        # 默认 300s
+HERMIT_RERANKER_IDLE_CHECK_INTERVAL=60  # 后台检查频率，默认 60s
+HERMIT_DENSE_IDLE_TIMEOUT=1800          # 默认 1800s（dense 调用更频繁，阈值更长）
+HERMIT_DENSE_IDLE_CHECK_INTERVAL=120    # 后台检查频率，默认 120s
 ```
 
 ### 3. 添加知识库
