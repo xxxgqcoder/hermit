@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import lancedb
@@ -31,6 +32,20 @@ logger = logging.getLogger(__name__)
 # Build a vector index once the table grows past this row count. LanceDB
 # recommends ~50k as the break-even point for IVF/HNSW vs brute-force scan.
 VECTOR_INDEX_THRESHOLD = 50_000
+
+# ── Optimize cadence ──────────────────────────────────────────
+# Every ``replace_file_chunks`` calls ``Table.optimize()`` so that newly-
+# appended rows show up in subsequent FTS searches. Optimize also runs
+# compact_files + cleanup_old_versions internally; by default LanceDB keeps
+# old versions for 7 days, which during an indexing burst (496 files × N
+# rebuild cycles) lets the on-disk dataset grow to ~500x its logical size
+# before any cleanup kicks in. We shorten the retention window so transient
+# versions get reaped during the same burst.
+#
+# 1 minute is comfortably longer than any single replace_file_chunks call
+# but short enough that back-to-back indexing settles fast. The latest
+# version is never removed regardless of this value.
+_OPTIMIZE_CLEANUP_OLDER_THAN = timedelta(minutes=1)
 
 _db: "DBConnection | None" = None
 _db_lock = threading.Lock()
@@ -107,6 +122,34 @@ def delete_collection(name: str) -> None:
         logger.info("Dropped LanceDB table '%s'", name)
 
 
+def compact_collection(name: str) -> None:
+    """One-shot aggressive compaction: keep only the latest version.
+
+    Called at startup to clean up any garbage accumulated by older Hermit
+    builds (which left the 7-day default cleanup window in place — see
+    ``_OPTIMIZE_CLEANUP_OLDER_THAN``). Idempotent and cheap when there is
+    nothing to reclaim.
+    """
+    connection = db()
+    if name not in connection.list_tables().tables:
+        return
+    tbl = connection.open_table(name)
+    versions_before = len(tbl.list_versions())
+    if versions_before <= 2:
+        # Single live version + maybe the initial empty manifest — nothing to do.
+        return
+    logger.info(
+        "Compacting collection '%s' (%d historical versions)",
+        name, versions_before,
+    )
+    tbl.optimize(cleanup_older_than=timedelta(seconds=0))
+    versions_after = len(tbl.list_versions())
+    logger.info(
+        "Compacted '%s': versions %d -> %d",
+        name, versions_before, versions_after,
+    )
+
+
 def _escape_sql(value: str) -> str:
     """Escape single quotes for SQL string literals."""
     return value.replace("'", "''")
@@ -159,6 +202,9 @@ def replace_file_chunks(
     tbl.add(rows)
     # LanceDB's native FTS index needs an explicit optimize for newly-appended
     # rows to become searchable across reader connections — without it,
-    # subsequent ``search(query_type="fts")`` calls miss those rows.
-    tbl.optimize()
+    # subsequent ``search(query_type="fts")`` calls miss those rows. Pass a
+    # short cleanup window so the historical fragments/index UUIDs spawned by
+    # each delete+add cycle get reaped instead of accumulating to 100x the
+    # logical dataset size (see ``_OPTIMIZE_CLEANUP_OLDER_THAN``).
+    tbl.optimize(cleanup_older_than=_OPTIMIZE_CLEANUP_OLDER_THAN)
     _maybe_build_vector_index(tbl)
