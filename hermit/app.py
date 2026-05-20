@@ -130,6 +130,26 @@ async def lifespan(app: FastAPI):
         save_signature()
         logger.info("Model signature updated.")
 
+    # Background catch-up compaction for users coming from older Hermit
+    # builds whose ``replace_file_chunks`` left a 7-day cleanup window in
+    # place — those datasets can balloon to 500x their logical size before
+    # any reclaim kicks in. Idempotent and cheap when nothing to clean.
+    def _startup_compaction(names: list[str]) -> None:
+        from hermit.storage.lance import compact_collection
+        for n in names:
+            try:
+                compact_collection(n)
+            except Exception:
+                logger.exception("Compaction failed for collection '%s'", n)
+
+    import threading as _threading
+    _threading.Thread(
+        target=_startup_compaction,
+        args=(list(_collections.keys()),),
+        name="hermit-startup-compaction",
+        daemon=True,
+    ).start()
+
     _server_ready = True
     logger.info("Hermit ready.")
     yield
