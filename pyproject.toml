@@ -12,9 +12,12 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "lancedb>=0.13",
+    "pyarrow>=14.0",
     "fastembed>=0.6",
     "huggingface_hub>=0.20",
     "onnx>=1.21.0",
+    "onnxruntime>=1.17",
+    "tokenizers>=0.15",
     "diskcache>=5.6",
 ]
 

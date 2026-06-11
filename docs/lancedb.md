@@ -33,8 +33,8 @@ vector      : fixed_size_list<float32, 768>   (jina-embeddings dense 向量)
 
 | 索引 | 列 | 时机 | 说明 |
 |---|---|---|---|
-| FTS（tantivy） | `text` | `ensure_collection` 时建 | hybrid / keyword 模式的关键词召回。`use_tantivy=False, with_position=False` |
-| FTS（tantivy） | `filename` | `ensure_collection` 时建 | filename 子串过滤候选 |
+| FTS（LanceDB 原生 inverted index） | `text` | `ensure_collection` 时建 | hybrid / keyword 模式的关键词召回。`use_tantivy=False, with_position=False` |
+| FTS（LanceDB 原生 inverted index） | `filename` | `ensure_collection` 时建 | filename 子串过滤候选 |
 | BTREE | `source_file` | `ensure_collection` 时建 | `delete_by_source_file` 必经路径 |
 | IVF/HNSW | `vector` | 行数 ≥ `VECTOR_INDEX_THRESHOLD`（默认 50_000）时懒建 | 小规模下裸扫更快，避免索引构建/再训练开销 |
 
@@ -69,6 +69,15 @@ filename 过滤分两条路径：
 - glob（含 `*?[`）→ 走全表扫描 + Python 端 `fnmatch` 后置过滤
 
 fuzzy 模式同样基于 `tbl.search().where("contains(lower(text), '<needle>')")` 的标量扫描——不再需要 Qdrant 时代的滚动分页 + 上限保护，因为 LanceDB 的 `where` 谓词由 DataFusion 下推到底层数据文件，扫描成本与命中数线性相关。
+
+## 压缩与版本回收
+
+LanceDB 默认为每次写入保留旧版本 **7 天**。一次索引突发里（数百文件 × N 轮重建）这会让磁盘数据集膨胀到逻辑大小的几百倍才被清理。对此：
+
+- **每次 `replace_file_chunks` 的 `optimize()` 都带 `cleanup_older_than=1min`**（`lance._OPTIMIZE_CLEANUP_OLDER_THAN`）——比单次写入耗时长、又短到能在同一突发内回收瞬时版本；最新版本永不删除。`optimize()` 内部同时跑 `compact_files` + `cleanup_old_versions`，并让新写入的行进入 FTS 索引。
+- **启动时 `compact_collection()` 一次性激进压缩**（`cleanup_older_than=0`），清理旧版本 Hermit（曾用 7 天默认窗口）遗留的历史版本垃圾；版本数 ≤2 时直接跳过，幂等且廉价。
+
+背景见提交 “Stop LanceDB from accumulating 100x its logical size”。
 
 ## 并发性
 

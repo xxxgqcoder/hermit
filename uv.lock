@@ -214,6 +214,9 @@ dependencies = [
     { name = "huggingface-hub" },
     { name = "lancedb" },
     { name = "onnx" },
+    { name = "onnxruntime" },
+    { name = "pyarrow" },
+    { name = "tokenizers" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -230,6 +233,9 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.20" },
     { name = "lancedb", specifier = ">=0.13" },
     { name = "onnx", specifier = ">=1.21.0" },
+    { name = "onnxruntime", specifier = ">=1.17" },
+    { name = "pyarrow", specifier = ">=14.0" },
+    { name = "tokenizers", specifier = ">=0.15" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
 ]
 
