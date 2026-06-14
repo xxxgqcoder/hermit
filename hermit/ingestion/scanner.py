@@ -86,7 +86,18 @@ def _index_file(
 
     chunks = chunk_markdown(text) if file_path.suffix.lower() == '.md' else chunk_text(text)
     if not chunks:
-        return False
+        # No indexable content (blank note, image-only, or frontmatter-only file).
+        # Record it in the metadata store anyway, otherwise scan_folder()'s three-way
+        # diff (disk_files - indexed_set) keeps classifying it as "added" on every
+        # poll and re-enqueues it forever (perpetual "added: N" with no progress).
+        # Drop any chunks left from a previous non-empty revision so the index stays
+        # consistent; skip the Lance write entirely for files that were never indexed.
+        if meta.get_chunk_count(fpath_str):
+            lance.delete_by_source_file(collection_name, fpath_str)
+        fhash = file_hash or _file_hash(file_path)
+        meta.upsert(fpath_str, fhash, file_path.stat().st_mtime, 0)
+        logger.info("Recorded empty file (0 chunks): %s", fpath_str)
+        return True
 
     # Prepend document title to each chunk for embedding
     title = file_path.stem
