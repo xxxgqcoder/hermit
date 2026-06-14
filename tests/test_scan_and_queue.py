@@ -189,6 +189,56 @@ def test_scan_folder_sync_mode(mock_index, mock_lance, scan_env, tmp_path, monke
     assert mock_index.call_count == 2
 
 
+@patch("hermit.ingestion.scanner.lance")
+def test_empty_file_recorded_and_not_re_added(mock_lance, tmp_path, monkeypatch):
+    """Regression: a 0-chunk (empty) file must be recorded in the metadata store so
+    the three-way diff doesn't keep classifying it as 'added' on every scan.
+
+    Previously ``_index_file`` returned early on empty content without an upsert, so
+    such files were never in ``indexed_set`` and got re-enqueued forever
+    (perpetual "added: N" with no progress)."""
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    empty = folder / "empty.md"
+    empty.write_text("")  # 0 chunks
+
+    class FakeMeta:
+        """Stateful in-memory metadata store shared across scans."""
+
+        def __init__(self):
+            self.records: dict[str, tuple[str, float, int]] = {}
+
+        def get_all_records(self):
+            return {p: (h, m) for p, (h, m, _c) in self.records.items()}
+
+        def upsert(self, file_path, file_hash, file_mtime, chunk_count):
+            self.records[file_path] = (file_hash, file_mtime, chunk_count)
+
+        def get_chunk_count(self, file_path):
+            rec = self.records.get(file_path)
+            return rec[2] if rec else 0
+
+        def delete(self, file_path):
+            self.records.pop(file_path, None)
+
+    meta = FakeMeta()
+    monkeypatch.setattr("hermit.ingestion.scanner.MetadataStore", lambda name: meta)
+
+    from hermit.ingestion.scanner import scan_folder
+
+    first = scan_folder("test", str(folder), defer_indexing=False)
+    assert first["added"] == 1                       # recorded on first encounter
+    assert str(empty) in meta.records                # ...into the metadata store
+    assert meta.records[str(empty)][2] == 0          # with chunk_count == 0
+
+    second = scan_folder("test", str(folder), defer_indexing=False)
+    assert second["added"] == 0                      # idempotent: not re-added
+    assert second["updated"] == 0
+    assert second["deleted"] == 0
+    # File never had prior chunks -> no Lance delete write should occur.
+    mock_lance.delete_by_source_file.assert_not_called()
+
+
 # ── Ignore pattern tests ────────────────────────────────────────
 
 
