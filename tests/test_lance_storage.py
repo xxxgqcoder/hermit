@@ -166,3 +166,67 @@ def test_vector_index_built_once_threshold_crossed(lance_env, monkeypatch):
         if "vector" in (idx.columns or [])
     ]
     assert vector_indices, "expected a vector index after crossing the threshold"
+
+
+# ── vacuum / orphan-index reclaim ────────────────────────────────
+
+
+def test_vacuum_reclaims_orphan_index_dirs(lance_env):
+    """Repeated optimize churn leaks ``_indices`` dirs; vacuum reclaims them.
+
+    LanceDB's optimize/cleanup never reaps orphaned index directories, so a
+    table that has seen many delete+add+optimize cycles accumulates them. A
+    vacuum rebuild must collapse the count back to the live-index set while
+    preserving rows and search.
+    """
+    name = "docs"
+    for i in range(12):
+        _add_chunks(lance_env, name, f"/f{i % 3}.md", count=4, seed_base=i * 10)
+
+    before = lance_env._index_dir_count(name)
+    rows_before = lance_env.open_table(name).count_rows()
+    assert before > 3, f"expected orphan churn, got only {before} index dirs"
+
+    assert lance_env.vacuum_collection(name) is True
+
+    after = lance_env._index_dir_count(name)
+    assert after < before
+    tbl = lance_env.open_table(name)
+    assert tbl.count_rows() == rows_before
+    assert {"text_idx", "filename_idx", "source_file_idx"} <= {
+        idx.name for idx in tbl.list_indices()
+    }
+    hits = tbl.search("hello", query_type="fts", fts_columns="text").limit(5).to_list()
+    assert hits
+
+
+def test_maybe_vacuum_noop_below_threshold(lance_env, monkeypatch):
+    monkeypatch.setattr(lance_mod, "VACUUM_INDEX_DIR_THRESHOLD", 10_000)
+    _add_chunks(lance_env, "docs", "/a.md", count=3)
+    assert lance_env.maybe_vacuum("docs") is False
+
+
+def test_maybe_vacuum_fires_above_threshold(lance_env, monkeypatch):
+    monkeypatch.setattr(lance_mod, "VACUUM_INDEX_DIR_THRESHOLD", 3)
+    for i in range(8):
+        _add_chunks(lance_env, "docs", f"/f{i % 2}.md", count=2, seed_base=i)
+    assert lance_env._index_dir_count("docs") > 3
+    assert lance_env.maybe_vacuum("docs") is True
+    assert lance_env.open_table("docs").count_rows() > 0
+
+
+def test_optimize_false_skips_optimize_but_rows_present(lance_env):
+    """Background path writes with optimize=False; rows land, FTS lags until flush."""
+    ids = [str(uuid.uuid4()) for _ in range(3)]
+    vectors = [_vec(i) for i in range(3)]
+    payloads = [_payload("/a.md", i) for i in range(3)]
+    lance_env.replace_file_chunks("docs", "/a.md", ids, vectors, payloads, optimize=False)
+    assert lance_env.open_table("docs").count_rows() == 3
+    lance_env.optimize_collection("docs")
+    hits = (
+        lance_env.open_table("docs")
+        .search("hello", query_type="fts", fts_columns="text")
+        .limit(5)
+        .to_list()
+    )
+    assert hits

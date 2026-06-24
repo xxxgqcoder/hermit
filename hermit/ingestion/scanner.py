@@ -74,8 +74,14 @@ def _index_file(
     file_path: Path,
     meta: MetadataStore,
     file_hash: str | None = None,
+    optimize: bool = True,
 ) -> bool:
-    """Read, chunk, embed, and upsert a single file. Returns True on success."""
+    """Read, chunk, embed, and upsert a single file. Returns True on success.
+
+    ``optimize`` is forwarded to ``replace_file_chunks``. The background queue
+    passes ``optimize=False`` and flushes one ``optimize_collection`` per
+    burst instead of refreshing the FTS index after every file.
+    """
     fpath_str = str(file_path)
 
     try:
@@ -122,7 +128,8 @@ def _index_file(
     ]
 
     lance.replace_file_chunks(
-        collection_name, fpath_str, ids, dense_vectors, payloads
+        collection_name, fpath_str, ids, dense_vectors, payloads,
+        optimize=optimize,
     )
 
     fhash = file_hash or _file_hash(file_path)

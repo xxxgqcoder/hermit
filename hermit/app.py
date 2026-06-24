@@ -130,23 +130,25 @@ async def lifespan(app: FastAPI):
         save_signature()
         logger.info("Model signature updated.")
 
-    # Background catch-up compaction for users coming from older Hermit
-    # builds whose ``replace_file_chunks`` left a 7-day cleanup window in
-    # place — those datasets can balloon to 500x their logical size before
-    # any reclaim kicks in. Idempotent and cheap when nothing to clean.
-    def _startup_compaction(names: list[str]) -> None:
-        from hermit.storage.lance import compact_collection
+    # Background catch-up vacuum. Older Hermit builds optimized the FTS index
+    # on every file write, orphaning an ``_indices/<uuid>`` directory each
+    # time — and LanceDB's cleanup never reaps those, so datasets balloon to
+    # hundreds of GB against a few hundred MB of logical data. ``maybe_vacuum``
+    # rebuilds a table only when orphan dirs have actually piled up, so this is
+    # cheap (one ``listdir``) when there's nothing to reclaim.
+    def _startup_vacuum(names: list[str]) -> None:
+        from hermit.storage.lance import maybe_vacuum
         for n in names:
             try:
-                compact_collection(n)
+                maybe_vacuum(n)
             except Exception:
-                logger.exception("Compaction failed for collection '%s'", n)
+                logger.exception("Vacuum failed for collection '%s'", n)
 
     import threading as _threading
     _threading.Thread(
-        target=_startup_compaction,
+        target=_startup_vacuum,
         args=(list(_collections.keys()),),
-        name="hermit-startup-compaction",
+        name="hermit-startup-vacuum",
         daemon=True,
     ).start()
 

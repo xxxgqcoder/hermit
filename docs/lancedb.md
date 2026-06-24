@@ -44,7 +44,7 @@ vector      : fixed_size_list<float32, 768>   (jina-embeddings dense 向量)
 
 - **分词器**：LanceDB 原生 FTS（`use_tantivy=False`）默认使用简单 lowercase 分词器，无词干提取
 - **多列**：单个 FTS 索引只能覆盖一列，因此 `text` 与 `filename` 各建一个索引
-- **更新可见性**：`tbl.add(...)` 写入后必须显式 `tbl.optimize()` 才能让新行进入 FTS 索引；`replace_file_chunks` 已内置该调用
+- **更新可见性**：`tbl.add(...)` 写入后必须显式 `tbl.optimize()` 才能让新行进入 FTS 索引。`replace_file_chunks(optimize=True)` 默认内置该调用（同步/一次性写入用）；后台索引队列改为写入时 `optimize=False`、整批排空后只 `optimize_collection()` 一次，避免每文件重建索引（见下「压缩与版本回收」）
 - **查询时**：`tbl.search(query, query_type="fts", fts_columns="text")` 显式指定查询哪一列
 
 ## 混合检索（hybrid）
@@ -72,12 +72,17 @@ fuzzy 模式同样基于 `tbl.search().where("contains(lower(text), '<needle>')"
 
 ## 压缩与版本回收
 
-LanceDB 默认为每次写入保留旧版本 **7 天**。一次索引突发里（数百文件 × N 轮重建）这会让磁盘数据集膨胀到逻辑大小的几百倍才被清理。对此：
+**核心坑**：`optimize()` 每次都把 FTS 倒排索引**重建**到一个新的 `_indices/<uuid>` 目录，旧目录变成孤儿；而 LanceDB 的 `cleanup_old_versions` 只回收过期的**数据版本**（manifest），**根本不删 `_indices/` 下的孤儿索引目录**（在 lancedb 0.30.2 上实测：40 轮 delete+add+optimize 配 `cleanup_older_than=0` 后,磁盘仍残留 ~79 个孤儿索引目录）。早期 Hermit 每写一个文件就 `optimize()` 一次,叠加一个 re-index 死循环,使 `_indices/` 累积到 5 万+ 目录、单表上百 GB,而逻辑数据只有几百 MB。
 
-- **每次 `replace_file_chunks` 的 `optimize()` 都带 `cleanup_older_than=1min`**（`lance._OPTIMIZE_CLEANUP_OLDER_THAN`）——比单次写入耗时长、又短到能在同一突发内回收瞬时版本；最新版本永不删除。`optimize()` 内部同时跑 `compact_files` + `cleanup_old_versions`，并让新写入的行进入 FTS 索引。
-- **启动时 `compact_collection()` 一次性激进压缩**（`cleanup_older_than=0`），清理旧版本 Hermit（曾用 7 天默认窗口）遗留的历史版本垃圾；版本数 ≤2 时直接跳过，幂等且廉价。
+对此分三层处理：
 
-背景见提交 “Stop LanceDB from accumulating 100x its logical size”。
+- **不再每文件 optimize**。`replace_file_chunks` 只写行；后台索引队列在一批文件排空后只调用一次 `optimize_collection()`（见 `ingestion/task_queue.py` 的 `_flush_collection`）。这把繁忙集合上从「每文件一次、累计数十万次」的 optimize 降到「每突发一次」,churn 与 CPU 同步骤降。`cleanup_older_than=1min`（`lance._OPTIMIZE_CLEANUP_OLDER_THAN`）让单次突发的瞬时版本及时回收；最新版本永不删除。
+- **唯一可靠的孤儿回收 = 重建表**。`vacuum_collection()` 读出当前 live 行 → drop 表 → 同名重建 → 重建索引,重建后的表只带 live 索引,磁盘体积塌回逻辑数据大小。注意 `to_arrow()` 会把全部行（含 dense 向量）读进内存,当前规模（数万行 ≈ 数百 MB）无碍,逼近 100 万 chunk 的 deep-search 目标时需改成分批流式。
+- **按需触发**。`maybe_vacuum()` 仅当磁盘 `_indices` 目录数超过 `VACUUM_INDEX_DIR_THRESHOLD`（默认 32,健康表只有 ~3）时才重建——平时只是一次 `listdir`,极廉价。启动时（`app.py` 后台线程）和每次突发 flush 后都会调一次,实现自愈,无需人工干预。
+
+一次性回收历史垃圾：停掉 server 后跑 `scripts/reclaim_lance.py`（对每个集合做一次 `vacuum_collection`）。
+
+背景见提交 “Stop LanceDB from accumulating 100x its logical size” 以及本次孤儿索引回收。
 
 ## 并发性
 

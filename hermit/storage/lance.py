@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import defaultdict
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -34,21 +35,43 @@ logger = logging.getLogger(__name__)
 VECTOR_INDEX_THRESHOLD = 50_000
 
 # ── Optimize cadence ──────────────────────────────────────────
-# Every ``replace_file_chunks`` calls ``Table.optimize()`` so that newly-
-# appended rows show up in subsequent FTS searches. Optimize also runs
-# compact_files + cleanup_old_versions internally; by default LanceDB keeps
-# old versions for 7 days, which during an indexing burst (496 files × N
-# rebuild cycles) lets the on-disk dataset grow to ~500x its logical size
-# before any cleanup kicks in. We shorten the retention window so transient
-# versions get reaped during the same burst.
+# ``Table.optimize()`` makes newly-appended rows visible to the native FTS
+# index and runs compact_files + cleanup_old_versions internally. Each call
+# *rebuilds* the FTS index under a fresh ``_indices/<uuid>`` directory and
+# orphans the previous one — and LanceDB's cleanup_old_versions reaps stale
+# data versions but NOT those orphaned index directories (verified on
+# lancedb 0.30.2: 40 delete+add+optimize cycles with cleanup_older_than=0
+# still leave ~79 orphan index dirs on disk). So two things matter:
 #
-# 1 minute is comfortably longer than any single replace_file_chunks call
-# but short enough that back-to-back indexing settles fast. The latest
-# version is never removed regardless of this value.
+#   1. Don't optimize per file. ``replace_file_chunks`` only writes rows;
+#      the task queue flushes one ``optimize_collection`` per indexing burst
+#      (see ingestion/task_queue.py). This cut what was ~600k optimizes on a
+#      busy collection down to one-per-burst.
+#   2. Periodically ``vacuum_collection`` — the only reliable way to reclaim
+#      orphaned index dirs is to rebuild the table from its live rows. It is
+#      gated behind ``maybe_vacuum`` so it only fires once orphans pile up.
+#
+# The cleanup window stays short so transient versions from a single burst
+# get reaped promptly. The latest version is never removed regardless.
 _OPTIMIZE_CLEANUP_OLDER_THAN = timedelta(minutes=1)
+
+# Rebuild a table once its on-disk index directory count exceeds this. A
+# healthy table has one dir per live index (~3: text/filename/source_file,
+# plus vector once built). Anything well above that is orphan accumulation.
+VACUUM_INDEX_DIR_THRESHOLD = 32
 
 _db: "DBConnection | None" = None
 _db_lock = threading.Lock()
+
+# Per-collection lock serializing writers (replace/optimize) against the
+# destructive drop+recreate in ``vacuum_collection`` — they share the single
+# ``db()`` connection, so a vacuum must not interleave with an in-flight add.
+_collection_locks: "defaultdict[str, threading.Lock]" = defaultdict(threading.Lock)
+
+
+def _collection_lock(name: str) -> threading.Lock:
+    with _db_lock:
+        return _collection_locks[name]
 
 
 def _schema() -> pa.Schema:
@@ -122,32 +145,89 @@ def delete_collection(name: str) -> None:
         logger.info("Dropped LanceDB table '%s'", name)
 
 
-def compact_collection(name: str) -> None:
-    """One-shot aggressive compaction: keep only the latest version.
+def _index_dir_count(name: str) -> int:
+    """Number of ``_indices/<uuid>`` directories on disk for a collection.
 
-    Called at startup to clean up any garbage accumulated by older Hermit
-    builds (which left the 7-day default cleanup window in place — see
-    ``_OPTIMIZE_CLEANUP_OLDER_THAN``). Idempotent and cheap when there is
-    nothing to reclaim.
+    A healthy table has roughly one per live index; a much larger count is
+    orphaned FTS-index churn that ``optimize`` cannot reclaim.
+    """
+    idx_dir = DATA_ROOT / "lance" / f"{name}.lance" / "_indices"
+    if not idx_dir.is_dir():
+        return 0
+    return sum(1 for p in idx_dir.iterdir() if p.is_dir())
+
+
+def vacuum_collection(name: str) -> bool:
+    """Rebuild a table from its live rows to reclaim orphaned index dirs.
+
+    LanceDB's ``optimize``/``cleanup_old_versions`` reaps stale data versions
+    but leaves orphaned ``_indices/<uuid>`` directories behind, so a table
+    that has seen heavy delete+add+optimize churn keeps growing without
+    bound. The only reliable reclaim is to read the current rows, drop the
+    table, and recreate it fresh — the rebuilt table carries only its live
+    indices, so on-disk size collapses back to the logical data size.
+
+    Returns True if a rebuild happened. Holds the per-collection lock so it
+    never interleaves with a concurrent ``replace_file_chunks`` add.
+
+    NOTE: ``to_arrow()`` materializes every row (incl. dense vectors) in
+    memory. Fine at the current scale (tens of thousands of rows ≈ hundreds
+    of MB); revisit with batched streaming if collections grow toward the
+    1M-chunk deep-search target.
+    """
+    connection = db()
+    if name not in connection.list_tables().tables:
+        return False
+    with _collection_lock(name):
+        tbl = connection.open_table(name)
+        had_vector_index = any(
+            idx.name == "vector_idx" for idx in tbl.list_indices()
+        )
+        data = tbl.to_arrow()
+        logger.info(
+            "Vacuuming collection '%s': %d rows, %d index dirs on disk",
+            name, data.num_rows, _index_dir_count(name),
+        )
+        connection.drop_table(name)
+        if data.num_rows == 0:
+            new_tbl = connection.create_table(name, schema=_schema(), mode="create")
+        else:
+            new_tbl = connection.create_table(name, data=data, mode="create")
+        _ensure_indexes(new_tbl)
+        if had_vector_index:
+            new_tbl.create_index(metric="cosine", vector_column_name="vector")
+    logger.info(
+        "Vacuumed '%s': now %d index dirs on disk",
+        name, _index_dir_count(name),
+    )
+    return True
+
+
+def maybe_vacuum(name: str) -> bool:
+    """Vacuum a collection only if orphaned index dirs have piled up.
+
+    Cheap to call repeatedly — a single ``listdir`` when there's nothing to
+    do. This replaces the old startup ``compact_collection``, whose
+    ``optimize(cleanup_older_than=0)`` never actually reclaimed the orphaned
+    index directories it was meant to.
+    """
+    if _index_dir_count(name) <= VACUUM_INDEX_DIR_THRESHOLD:
+        return False
+    return vacuum_collection(name)
+
+
+def optimize_collection(name: str) -> None:
+    """Make newly-appended rows searchable via the native FTS index.
+
+    Called once per indexing burst (on task-queue drain) instead of per file.
+    Runs under the per-collection lock so it doesn't race a vacuum.
     """
     connection = db()
     if name not in connection.list_tables().tables:
         return
-    tbl = connection.open_table(name)
-    versions_before = len(tbl.list_versions())
-    if versions_before <= 2:
-        # Single live version + maybe the initial empty manifest — nothing to do.
-        return
-    logger.info(
-        "Compacting collection '%s' (%d historical versions)",
-        name, versions_before,
-    )
-    tbl.optimize(cleanup_older_than=timedelta(seconds=0))
-    versions_after = len(tbl.list_versions())
-    logger.info(
-        "Compacted '%s': versions %d -> %d",
-        name, versions_before, versions_after,
-    )
+    with _collection_lock(name):
+        tbl = connection.open_table(name)
+        tbl.optimize(cleanup_older_than=_OPTIMIZE_CLEANUP_OLDER_THAN)
 
 
 def _escape_sql(value: str) -> str:
@@ -180,31 +260,38 @@ def replace_file_chunks(
     ids: list[str],
     vectors: list[list[float]],
     payloads: list[dict],
+    optimize: bool = True,
 ) -> None:
     """Atomically drop existing rows for ``source_file`` and insert new ones.
 
     ``payloads`` carries the per-chunk metadata (text/title/filename/
     chunk_index/total_chunks). ``vectors`` is the dense embedding list,
     aligned with ``ids``.
+
+    With ``optimize=True`` (default) the FTS index is refreshed immediately so
+    the new rows are searchable — convenient for synchronous/one-off writes.
+    The background indexing queue passes ``optimize=False`` and instead calls
+    ``optimize_collection`` once per burst, because optimizing per file both
+    burns CPU and orphans an FTS-index directory each call (see the module
+    docstring on ``_OPTIMIZE_CLEANUP_OLDER_THAN``).
     """
-    tbl = ensure_collection(collection_name)
-    tbl.delete(f"source_file = '{_escape_sql(source_file)}'")
-    if not ids:
-        return
-    rows = [
-        {
-            "id": ids[i],
-            "vector": vectors[i],
-            **payloads[i],
-        }
-        for i in range(len(ids))
-    ]
-    tbl.add(rows)
-    # LanceDB's native FTS index needs an explicit optimize for newly-appended
-    # rows to become searchable across reader connections — without it,
-    # subsequent ``search(query_type="fts")`` calls miss those rows. Pass a
-    # short cleanup window so the historical fragments/index UUIDs spawned by
-    # each delete+add cycle get reaped instead of accumulating to 100x the
-    # logical dataset size (see ``_OPTIMIZE_CLEANUP_OLDER_THAN``).
-    tbl.optimize(cleanup_older_than=_OPTIMIZE_CLEANUP_OLDER_THAN)
-    _maybe_build_vector_index(tbl)
+    with _collection_lock(collection_name):
+        tbl = ensure_collection(collection_name)
+        tbl.delete(f"source_file = '{_escape_sql(source_file)}'")
+        if not ids:
+            return
+        rows = [
+            {
+                "id": ids[i],
+                "vector": vectors[i],
+                **payloads[i],
+            }
+            for i in range(len(ids))
+        ]
+        tbl.add(rows)
+        if optimize:
+            # Native FTS needs an explicit optimize for appended rows to
+            # become searchable across reader connections. Short cleanup
+            # window so the per-cycle fragments get reaped promptly.
+            tbl.optimize(cleanup_older_than=_OPTIMIZE_CLEANUP_OLDER_THAN)
+        _maybe_build_vector_index(tbl)

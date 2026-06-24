@@ -72,7 +72,30 @@ class _IndexTaskQueue:
                 with self._lock:
                     self._in_progress.discard(key)
                     self._pending.discard(key)
+                    drained = not any(
+                        k[0] == task.collection_name
+                        for k in (self._pending | self._in_progress)
+                    )
+                if drained:
+                    self._flush_collection(task.collection_name)
                 self._queue.task_done()
+
+    def _flush_collection(self, collection_name: str):
+        """Run once when a collection's indexing burst settles.
+
+        Background indexing writes rows with ``optimize=False`` (see
+        ``_handle_task``), so the FTS index won't see them until we optimize.
+        Doing it once per drained burst — instead of once per file — is what
+        keeps index-directory churn (and CPU) bounded. Then opportunistically
+        reclaim if orphaned index dirs have piled up.
+        """
+        try:
+            lance.optimize_collection(collection_name)
+            lance.maybe_vacuum(collection_name)
+        except Exception:
+            logger.exception(
+                "Post-burst flush failed for collection '%s'", collection_name
+            )
 
     def get_status(self, collection_name: str) -> dict:
         with self._lock:
@@ -156,6 +179,7 @@ class _IndexTaskQueue:
             file_path,
             meta,
             file_hash=task.file_hash,
+            optimize=False,
         )
         if ok:
             logger.info("Indexed by background task: %s", task.file_path)
