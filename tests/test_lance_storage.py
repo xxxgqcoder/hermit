@@ -6,6 +6,7 @@ collections don't bleed between tests.
 
 from __future__ import annotations
 
+import os
 import uuid
 
 import pytest
@@ -230,3 +231,63 @@ def test_optimize_false_skips_optimize_but_rows_present(lance_env):
         .to_list()
     )
     assert hits
+
+
+# ── vacuum crash-safety (temp-build + atomic rename) ──────────────
+
+
+def test_vacuum_leaves_no_temp_dir(lance_env):
+    """A clean vacuum swaps the temp into place and leaves nothing behind."""
+    _add_chunks(lance_env, "docs", "/a.md", count=3)
+    assert lance_env.vacuum_collection("docs") is True
+    assert not os.path.exists(lance_env._table_dir("docs__vacuum"))
+    assert lance_env.open_table("docs").count_rows() == 3
+
+
+def test_recover_discards_temp_when_final_present(lance_env):
+    """Crash while building the temp: original intact → temp discarded."""
+    _add_chunks(lance_env, "docs", "/a.md", count=3)
+    # Fabricate a leftover temp from an aborted build.
+    _add_chunks(lance_env, "docs__vacuum", "/x.md", count=1)
+    assert os.path.exists(lance_env._table_dir("docs__vacuum"))
+
+    lance_env.recover_vacuum_temp("docs")
+
+    assert not os.path.exists(lance_env._table_dir("docs__vacuum"))
+    # Original data untouched.
+    assert lance_env.open_table("docs").count_rows() == 3
+
+
+def test_recover_promotes_temp_when_final_missing(lance_env):
+    """Crash between drop and rename: final gone, fully-built temp → promoted."""
+    # The temp is the verified replacement; the original was already dropped.
+    _add_chunks(lance_env, "docs__vacuum", "/a.md", count=4)
+    final = lance_env._table_dir("docs")
+    assert not os.path.exists(final)
+    assert os.path.exists(lance_env._table_dir("docs__vacuum"))
+
+    lance_env.recover_vacuum_temp("docs")
+
+    assert os.path.exists(final)
+    assert not os.path.exists(lance_env._table_dir("docs__vacuum"))
+    t = lance_env.open_table("docs")
+    assert t.count_rows() == 4
+
+
+def test_recover_noop_without_temp(lance_env):
+    """No leftover temp → recovery is a cheap no-op that leaves data alone."""
+    _add_chunks(lance_env, "docs", "/a.md", count=2)
+    lance_env.recover_vacuum_temp("docs")  # must not raise
+    assert lance_env.open_table("docs").count_rows() == 2
+
+
+def test_vacuum_clears_stale_temp_before_rebuild(lance_env):
+    """A stale temp from a prior aborted run must not break a fresh vacuum."""
+    _add_chunks(lance_env, "docs", "/a.md", count=3)
+    # Leftover temp on disk from an earlier crash.
+    _add_chunks(lance_env, "docs__vacuum", "/stale.md", count=9)
+
+    assert lance_env.vacuum_collection("docs") is True
+    assert not os.path.exists(lance_env._table_dir("docs__vacuum"))
+    # The vacuum rebuilt from the *real* table, not the stale temp.
+    assert lance_env.open_table("docs").count_rows() == 3

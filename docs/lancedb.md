@@ -77,8 +77,8 @@ fuzzy 模式同样基于 `tbl.search().where("contains(lower(text), '<needle>')"
 对此分三层处理：
 
 - **不再每文件 optimize**。`replace_file_chunks` 只写行；后台索引队列在一批文件排空后只调用一次 `optimize_collection()`（见 `ingestion/task_queue.py` 的 `_flush_collection`）。这把繁忙集合上从「每文件一次、累计数十万次」的 optimize 降到「每突发一次」,churn 与 CPU 同步骤降。`cleanup_older_than=1min`（`lance._OPTIMIZE_CLEANUP_OLDER_THAN`）让单次突发的瞬时版本及时回收；最新版本永不删除。
-- **唯一可靠的孤儿回收 = 重建表**。`vacuum_collection()` 读出当前 live 行 → drop 表 → 同名重建 → 重建索引,重建后的表只带 live 索引,磁盘体积塌回逻辑数据大小。注意 `to_arrow()` 会把全部行（含 dense 向量）读进内存,当前规模（数万行 ≈ 数百 MB）无碍,逼近 100 万 chunk 的 deep-search 目标时需改成分批流式。
-- **按需触发**。`maybe_vacuum()` 仅当磁盘 `_indices` 目录数超过 `VACUUM_INDEX_DIR_THRESHOLD`（默认 32,健康表只有 ~3）时才重建——平时只是一次 `listdir`,极廉价。启动时（`app.py` 后台线程）和每次突发 flush 后都会调一次,实现自愈,无需人工干预。
+- **唯一可靠的孤儿回收 = 重建表**。`vacuum_collection()` 把当前 live 行重建成一张只带 live 索引的新表,磁盘体积塌回逻辑数据大小。**崩溃安全**是设计要点:先在临时表 `<name>__vacuum` 里建好数据+索引（所有耗时且可能 panic 的步骤——尤其 FTS builder——都发生在这里,原表毫发无损）,**校验行数一致后**才 `drop` 原表 + `os.rename` 临时目录就位（同盘原子 rename,窗口极小且零计算）。任何步骤在 rename 前失败,原表都完好;若恰好崩在 drop 与 rename 之间,启动时 `recover_vacuum_temp()` 会按目录状态机收拾残局（原表在→丢弃临时表;原表不在→把已建好的临时表提升上位）。注意 `to_arrow()` 会把全部行（含 dense 向量）读进内存,当前规模（数万行 ≈ 数百 MB）无碍,逼近 100 万 chunk 的 deep-search 目标时需改成分批流式。
+- **按需触发**。`maybe_vacuum()` 仅当磁盘 `_indices` 目录数超过 `VACUUM_INDEX_DIR_THRESHOLD`（默认 32,健康表只有 ~3）时才重建——平时只是一次 `listdir`,极廉价。启动时（`app.py` 后台线程）和每次突发 flush 后都会调一次,实现自愈,无需人工干预。崩溃恢复 `recover_vacuum_temp()` 则在 `app.py` 恢复 collection、打开表**之前**先跑。
 
 一次性回收历史垃圾：停掉 server 后跑 `scripts/reclaim_lance.py`（对每个集合做一次 `vacuum_collection`）。
 

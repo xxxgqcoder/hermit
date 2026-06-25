@@ -94,11 +94,16 @@ async def lifespan(app: FastAPI):
     from hermit.ingestion.watcher import start_watching
     from hermit.api.routes import _collections
 
+    from hermit.storage.lance import recover_vacuum_temp
+
     for name, cfg in get_all().items():
         logger.info("Restoring collection '%s' from %s", name, cfg["folder_path"])
         ig_pat = cfg.get("ignore_patterns", [])
         ig_ext = cfg.get("ignore_extensions", [])
         try:
+            # Reconcile a half-finished vacuum before the table is opened, so a
+            # crash mid-swap can never surface as a missing/empty collection.
+            recover_vacuum_temp(name)
             if model_changed:
                 logger.warning(
                     "Queuing full re-index for collection '%s' due to model change.",

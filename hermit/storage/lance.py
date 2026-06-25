@@ -14,6 +14,8 @@ build cost and index maintenance churn.
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import threading
 from collections import defaultdict
 from datetime import timedelta
@@ -57,8 +59,12 @@ _OPTIMIZE_CLEANUP_OLDER_THAN = timedelta(minutes=1)
 
 # Rebuild a table once its on-disk index directory count exceeds this. A
 # healthy table has one dir per live index (~3: text/filename/source_file,
-# plus vector once built). Anything well above that is orphan accumulation.
+# plus vector once built). The threshold leaves generous headroom over that
+# baseline so vacuum only fires on genuine orphan accumulation, not normal churn.
 VACUUM_INDEX_DIR_THRESHOLD = 32
+
+# Suffix for the scratch table vacuum builds before swapping it into place.
+_VACUUM_TMP_SUFFIX = "__vacuum"
 
 _db: "DBConnection | None" = None
 _db_lock = threading.Lock()
@@ -145,6 +151,11 @@ def delete_collection(name: str) -> None:
         logger.info("Dropped LanceDB table '%s'", name)
 
 
+def _table_dir(name: str) -> "os.PathLike[str]":
+    """On-disk directory backing a LanceDB table."""
+    return DATA_ROOT / "lance" / f"{name}.lance"
+
+
 def _index_dir_count(name: str) -> int:
     """Number of ``_indices/<uuid>`` directories on disk for a collection.
 
@@ -157,15 +168,59 @@ def _index_dir_count(name: str) -> int:
     return sum(1 for p in idx_dir.iterdir() if p.is_dir())
 
 
+def recover_vacuum_temp(name: str) -> None:
+    """Reconcile a leftover ``<name>__vacuum.lance`` from a crashed vacuum.
+
+    ``vacuum_collection`` builds the replacement table in a temp directory and
+    only then drops the original and renames the temp into place, so a crash
+    leaves one of two recoverable states:
+
+    - **final present + temp present** → the crash happened while the temp was
+      still being built; the original is intact, so discard the temp.
+    - **final missing + temp present** → the crash landed in the tiny window
+      between dropping the original and the rename; the temp is the fully-built,
+      row-count-verified replacement, so promote it.
+
+    Idempotent and cheap (a couple of ``exists`` checks). Call at startup
+    before opening the collection. The original data is never at risk: every
+    expensive, panic-prone step runs against the temp while the original
+    stands untouched.
+    """
+    final_dir = _table_dir(name)
+    tmp_dir = _table_dir(f"{name}{_VACUUM_TMP_SUFFIX}")
+    if not os.path.exists(tmp_dir):
+        return
+    with _collection_lock(name):
+        if os.path.exists(final_dir):
+            logger.warning(
+                "Discarding aborted vacuum temp for '%s' (original intact)", name
+            )
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        else:
+            logger.warning(
+                "Promoting vacuum temp for '%s' (crash between drop and rename)",
+                name,
+            )
+            os.rename(tmp_dir, final_dir)
+
+
 def vacuum_collection(name: str) -> bool:
     """Rebuild a table from its live rows to reclaim orphaned index dirs.
 
     LanceDB's ``optimize``/``cleanup_old_versions`` reaps stale data versions
     but leaves orphaned ``_indices/<uuid>`` directories behind, so a table
-    that has seen heavy delete+add+optimize churn keeps growing without
-    bound. The only reliable reclaim is to read the current rows, drop the
-    table, and recreate it fresh — the rebuilt table carries only its live
-    indices, so on-disk size collapses back to the logical data size.
+    that has seen heavy delete+add+optimize churn keeps growing without bound.
+    The only reliable reclaim is to recreate the table from its live rows so
+    it carries only its live indices, collapsing on-disk size to the logical
+    data size.
+
+    Crash-safe by construction: the replacement is built in a temp table
+    (``<name>__vacuum``) — where all the expensive, panic-prone work (FTS
+    index build) happens — and only after its row count is verified do we drop
+    the original and ``os.rename`` the temp into place. The original is dropped
+    only in a tiny, compute-free window; any failure before that leaves the
+    original fully intact, and ``recover_vacuum_temp`` reconciles a crash
+    inside the window on next startup.
 
     Returns True if a rebuild happened. Holds the per-collection lock so it
     never interleaves with a concurrent ``replace_file_chunks`` add.
@@ -178,24 +233,46 @@ def vacuum_collection(name: str) -> bool:
     connection = db()
     if name not in connection.list_tables().tables:
         return False
+    tmp_name = f"{name}{_VACUUM_TMP_SUFFIX}"
+    tmp_dir = _table_dir(tmp_name)
+    final_dir = _table_dir(name)
     with _collection_lock(name):
         tbl = connection.open_table(name)
-        had_vector_index = any(
-            idx.name == "vector_idx" for idx in tbl.list_indices()
-        )
+        expected = tbl.count_rows()
         data = tbl.to_arrow()
         logger.info(
             "Vacuuming collection '%s': %d rows, %d index dirs on disk",
-            name, data.num_rows, _index_dir_count(name),
+            name, expected, _index_dir_count(name),
         )
-        connection.drop_table(name)
+
+        # Clear any leftover temp from a previously aborted run.
+        if tmp_name in connection.list_tables().tables:
+            connection.drop_table(tmp_name)
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        # 1) Build the replacement in a temp table. Every expensive,
+        #    panic-prone step (FTS index build) happens here while the
+        #    original table stays fully intact on disk.
         if data.num_rows == 0:
-            new_tbl = connection.create_table(name, schema=_schema(), mode="create")
+            new_tbl = connection.create_table(tmp_name, schema=_schema(), mode="create")
         else:
-            new_tbl = connection.create_table(name, data=data, mode="create")
+            new_tbl = connection.create_table(tmp_name, data=data, mode="create")
         _ensure_indexes(new_tbl)
-        if had_vector_index:
-            new_tbl.create_index(metric="cosine", vector_column_name="vector")
+        _maybe_build_vector_index(new_tbl)
+
+        rebuilt = new_tbl.count_rows()
+        if rebuilt != expected:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise RuntimeError(
+                f"vacuum '{name}': rebuilt row count {rebuilt} != {expected}; "
+                "aborted with original intact"
+            )
+
+        # 2) Swap. Tiny, compute-free window: drop the original, then a
+        #    same-filesystem atomic rename moves the temp into place.
+        connection.drop_table(name)
+        os.rename(tmp_dir, final_dir)
     logger.info(
         "Vacuumed '%s': now %d index dirs on disk",
         name, _index_dir_count(name),
