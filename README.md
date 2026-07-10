@@ -489,7 +489,7 @@ Hermit keeps all runtime data under `~/.hermit/` by default (override with `HERM
 - `~/.hermit/data/metadata/`: one SQLite database per collection
 - `~/.hermit/data/collections.json`: persisted collection configuration
 - `~/.hermit/cache/dense/`: dense embedding cache (sha256-keyed, 30-day TTL)
-- `~/.hermit/logs/hermit.log`: server log
+- `~/.hermit/logs/hermit.log`: server log, rotated at 256 MiB with one backup (`hermit.log.1`)
 - `~/.hermit/hermit.pid` and `~/.hermit/port.json`: daemon bookkeeping
 
 Single directory makes Hermit easy to back up, move, and clean up.

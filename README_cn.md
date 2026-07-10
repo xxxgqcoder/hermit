@@ -469,7 +469,7 @@ Hermit 默认把所有运行时数据存到 `~/.hermit/`（可用 `HERMIT_HOME` 
 - `~/.hermit/data/metadata/`: 每个 collection 一个 SQLite 数据库
 - `~/.hermit/data/collections.json`: collection 持久化配置
 - `~/.hermit/cache/dense/`: dense 嵌入向量缓存（sha256 keyed，TTL 7 天）
-- `~/.hermit/logs/hermit.log`: 服务日志
+- `~/.hermit/logs/hermit.log`：服务日志，达到 256 MiB 时轮转，并保留一个备份（`hermit.log.1`）
 - `~/.hermit/hermit.pid` 和 `~/.hermit/port.json`: daemon 状态文件
 
 集中在单一目录，便于备份、迁移和清理。
