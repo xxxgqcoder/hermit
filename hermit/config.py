@@ -15,6 +15,8 @@ DATA_ROOT = HERMIT_HOME / "data"
 
 # Logs
 LOG_DIR = HERMIT_HOME / "logs"
+LOG_MAX_BYTES: int = 256 * 1024 * 1024
+LOG_BACKUP_COUNT: int = 1
 
 # Embedding cache (chunk text → vector). Keyed by sha256 of the exact text
 # passed to the model (title-prefixed chunk), namespaced by the model name so
