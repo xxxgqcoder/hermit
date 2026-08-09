@@ -1,232 +1,228 @@
 # Hermit
 
-[中文说明 / Chinese version](./README_cn.md)
+[English version](./README_en.md)
 
-Hermit is a **self-contained local semantic search service** for turning one or more document folders into searchable knowledge-base collections.
+Hermit 是一个**自包含、纯本地运行的语义检索服务**，用于把一个或多个文档目录注册成可搜索的知识库 collection。
 
-It is designed for local-first workflows and works well as a lightweight retrieval backend for notes, technical documents, and small RAG-style applications.
+它适合本地优先的工作流，也很适合作为笔记库、技术文档库和小型 RAG 应用的轻量检索后端。
 
-## Highlights
+## 特性
 
-- **Runs fully locally**: models, vector data, and metadata live inside the project
-- **Semantic Markdown chunking**: a state-machine parser splits `.md` files into 11 semantically coherent block types (headings, fenced code, math, tables, blockquotes, lists, …) before chunking — code blocks and tables are never split mid-content
-- **Heading-aware sliding window**: chunks always start at a section heading when possible, so each retrieved chunk is self-contained and retrieval-friendly even without surrounding context
-- **Embedded vector store**: LanceDB columnar storage, no Docker, no external server
-- **Multi-collection support**: one folder maps to one collection
-- **Hybrid retrieval**: dense vectors + tantivy FTS (BM25) fused via RRF
-- **Reranking**: a cross-encoder reranks the fused candidates
-- **Incremental sync**: startup scan plus periodic polling
-- **CPU-friendly**: built on `fastembed` + ONNX Runtime, no GPU required
+- **完全本地运行**：模型、向量数据和元数据都保存在项目目录中
+- **Markdown 语义切片**：状态机解析器将 `.md` 文件拆分为 11 种语义完整的 block 类型（标题、代码块、数学公式、表格、列表……），代码块和表格不会被从中间截断
+- **Heading-Aware 滑动窗口**：chunk 尽量从 section 标题开始，每个 chunk 无需外部上下文即可自我表达所属 section，检索命中质量更高
+- **嵌入式向量存储**：LanceDB 列存，无 Docker、无外部进程
+- **多 collection 支持**：一个目录对应一个 collection
+- **混合检索**：dense 向量 + tantivy FTS（BM25），通过 RRF 融合
+- **重排**：使用 cross-encoder 对融合后的候选结果进行 rerank
+- **增量同步**：启动时扫描，运行时定期轮询检测变化
+- **CPU 友好**：基于 `fastembed` + ONNX Runtime，无需 GPU
 
-## What it is good for
+## 适用场景
 
-Hermit is a good fit when you want to:
+Hermit 很适合这些场景：
 
-- search a local notes or markdown repository semantically
-- expose a simple retrieval API for a local tool or agent
-- build a private, small-footprint RAG layer without cloud dependencies
+- 对本地笔记仓库或 Markdown 文档做语义搜索
+- 为本地工具或 Agent 提供简单的检索 API
+- 在不依赖云服务的情况下搭建轻量、私有的 RAG 检索层
 
-The current implementation reads files as text using `UTF-8` with replacement on decode errors, so it works best with plain-text sources such as `.md` and `.txt` files.
+当前实现会把文件按文本读取，使用 `UTF-8` 解码，解码失败时进行容错替换，因此最适合 `.md`、`.txt` 等纯文本内容。
 
-## How it works
+## 工作方式
 
-### Retrieval pipeline
+### 检索流程
 
-Hermit uses the following search flow:
+Hermit 的搜索流程如下：
 
-1. Encode the query into a dense vector
-2. Run hybrid retrieval in LanceDB (vector + tantivy FTS) with RRF fusion
-3. Rerank the candidate set with a cross-encoder
-4. Return the top matching chunks
+1. 将 query 编码为 dense 向量
+2. 在 LanceDB 中执行混合召回（向量 + tantivy FTS），用 RRF 融合
+3. 用 cross-encoder 对候选结果做 rerank
+4. 返回最相关的 chunk
 
-### Indexing pipeline
+### 索引流程
 
-Each registered folder goes through:
+每个已注册目录都会经历：
 
-1. startup scan
-2. SQLite metadata diffing
-3. text chunking (see below)
-4. dense embedding generation
-5. LanceDB upsert (FTS index updates automatically)
-6. ongoing periodic polling
+1. 启动扫描
+2. SQLite 元数据对比
+3. 文本分块（见下文）
+4. 生成 dense 向量
+5. 写入 LanceDB（FTS 索引随写入自动更新）
+6. 定期轮询检测
 
-### Markdown semantic chunking
+### Markdown 语义切片
 
-For `.md` files, Hermit uses a two-phase strategy instead of a simple token sliding window:
+对于 `.md` 文件，Hermit 采用两阶段策略，而非简单的 token 滑动窗口：
 
-**Phase 1 — block parsing (`parse_md_blocks`)**: A state-machine parser scans the file line-by-line and groups content into 11 semantically coherent block types:
+**第一阶段 — 块解析（`parse_md_blocks`）**：状态机解析器逐行扫描文件，将内容归类为 11 种语义完整的 block 类型：
 
-| Block type | Examples |
+| block 类型 | 示例 |
 |---|---|
-| YAML frontmatter | `---` … `---` at file start |
-| Fenced code block | ` ``` ` … ` ``` ` or `~~~` … `~~~` |
-| Math block | `$$` … `$$` |
-| ATX heading | `# H1` … `###### H6` |
-| Setext heading | underline with `===` or `---` |
-| Table | pipe-delimited rows |
-| Blockquote | `>` prefixed lines |
-| Horizontal rule | `---` / `***` / `___` |
-| List | entire list including nested items |
-| Standalone image | `![alt](url)` or Obsidian `![[path]]` |
-| Paragraph | any other contiguous non-blank text |
+| YAML frontmatter | 文件首部 `---` … `---` |
+| 代码围栏块 | ` ``` ` … ` ``` ` 或 `~~~` … `~~~` |
+| 数学块 | `$$` … `$$` |
+| ATX 标题 | `# H1` … `###### H6` |
+| Setext 标题 | 文本 + `===` 或 `---` 下划线 |
+| 表格 | 管道符分隔的连续行 |
+| 引用块 | `>` 前缀行 |
+| 分隔线 | `---` / `***` / `___` |
+| 列表 | 整个列表，含嵌套子项 |
+| 独立图片 | `![alt](url)` 或 Obsidian `![[path]]` |
+| 段落 | 其他连续非空行 |
 
-This ensures fenced code blocks, math formulas, and tables are always kept intact as a unit.
+代码块、数学公式、表格始终作为完整单元保留，不会被从中间截断。
 
-**Phase 2 — heading-aware sliding window (`chunk_markdown`)**: Blocks are grouped into chunks (default: 4 blocks per chunk) with two structural rules:
+**第二阶段 — Heading-Aware 滑动窗口（`chunk_markdown`）**：将 block 组合为 chunk（默认每个 chunk 包含 4 个 block），遵循两条结构性规则：
 
-- **Rule 1 — no orphan headings**: if the last block in a chunk is a heading, the chunk is automatically extended by one block so the heading always enters a chunk together with at least its first body block.
-- **Rule 2 — heading-anchored start**: the next chunk begins at the nearest preceding heading rather than at an arbitrary paragraph, so every chunk carries its own section context.
+- **Rule 1 — 不孤立标题**：若当前 chunk 末尾是标题，自动多包一个 body block，确保标题不会单独出现在 chunk 末尾。
+- **Rule 2 — 标题锚定起点**：下一个 chunk 从最近的前置标题开始，而不是从随机段落开始，使每个 chunk 都携带所属 section 的上下文。
 
-Other file types continue to use the token-based sliding window (`chunk_text`).
+其他文件类型继续使用基于 token 的滑动窗口（`chunk_text`）。
 
-See [docs/markdown-chunking.md](docs/markdown-chunking.md) for the full design.
+详细设计见 [docs/markdown-chunking.md](docs/markdown-chunking.md)。
 
-### Default settings
+### 默认参数
 
-- Chunk size: `256` tokens (using the embedding model's tokenizer)
+- Chunk size: `256` tokens（使用 embedding 模型的 tokenizer）
 - Chunk overlap: `32` tokens
-- Search `top_k`: `5`
-- Default rerank candidates: `20`
-- Max collections: `4`
-- Max collection name length: `64`
-- Default port: `8000`
+- 搜索 `top_k`: `5`
+- 默认 rerank candidates: `20`
+- collection 数量上限: `4`
+- collection 名称最大长度: `64`
+- 默认端口: `8000`
 
-## Tech stack
+## 技术栈
 
-- **API framework**: FastAPI
-- **Vector database**: LanceDB (embedded, columnar, tantivy FTS)
-- **Inference backend**: fastembed (ONNX-based, parallelized via `ThreadPoolExecutor`)
-- **Metadata store**: SQLite
-- **Filesystem watcher**: periodic polling
+- **API 框架**: FastAPI
+- **向量数据库**: LanceDB（嵌入式列存，自带 tantivy FTS）
+- **推理后端**: fastembed (基于 ONNX, 支持 `ThreadPoolExecutor` 并行化)
+- **元数据存储**: SQLite
+- **文件监听**: 定期轮询 (Polling)
 
-Current models:
+关键词检索由 LanceDB 自带的 tantivy FTS 提供，不再单独加载稀疏 embedding
+模型。存储布局、索引策略、查询语义见 [docs/lancedb.md](docs/lancedb.md)。
 
-- Dense embedding: `jinaai/jina-embeddings-v2-base-zh`
-- Reranker: `jinaai/jina-reranker-v2-base-multilingual`
+## 性能与内存
 
-Keyword recall is provided by LanceDB's tantivy FTS index — no separate
-sparse embedding model is loaded. See [docs/lancedb.md](docs/lancedb.md)
-for the storage layout, index strategy, and query semantics.
+Hermit 针对本地搜索的稳定内存占用进行了优化：
+- **串行搜索请求**：搜索请求通过单 worker executor 串行执行，避免多个 reranker 请求同时占用共享 ONNX session。
+- **限制 ONNX 推理线程**：默认使用 `HERMIT_ONNX_THREADS=2`，避免 ONNX Runtime 每线程 arena 累积带来的常驻内存膨胀；仅在测得单请求延迟收益足够时再调大。
+- **缩小重排候选池**：默认每次查询使用 20 个候选，并保留 Cross-Encoder reranker 精排。
+- **嵌入缓存**：索引时若某个 chunk 的模型输入文本之前已经算过（sha256 keyed by `model_name::input_text`），直接复用磁盘缓存里的向量，跳过 ONNX 推理。缓存路径 `HERMIT_HOME/cache`，TTL 7 天硬编码；命中时校验向量维度，不合法当未命中处理（模型升级 / 旧脏数据自愈）。设计上默认开启、不提供关闭开关。
 
-## Performance & Memory
-
-Hermit is optimized for stable local search memory usage:
-- **Serialized Search**: Search requests run through a single-worker executor. This keeps the shared ONNX sessions from serving multiple reranker requests concurrently.
-- **Bounded ONNX Inference**: Uses `HERMIT_ONNX_THREADS=2` by default to keep ONNX Runtime per-thread arenas small. Raise it only after measuring that latency improves enough to justify the extra resident memory.
-- **Smaller Rerank Pool**: Uses 20 candidates per query by default while keeping cross-encoder reranking enabled.
-- **Embedding Cache**: Indexing skips ONNX inference for chunks whose exact model input was seen before. Dense vectors are cached on disk (`HERMIT_HOME/cache/dense`, sha256-keyed by `model_name::input_text`) with a 30-day TTL. Cache hits validate the vector dimension and fall back to a fresh embed on mismatch — model upgrades or partially-corrupted entries are self-healing. Always on by design; the cache is bounded and self-reaping.
-
-## Project layout
+## 项目结构
 
 ```text
 .
 ├── main.py
 ├── pyproject.toml
-├── README.md / README_cn.md
+├── AGENTS.md
+├── README.md / README_en.md
 ├── docs/
 │   ├── design.md
-│   ├── lancedb.md
 │   ├── markdown-chunking.md
+│   ├── lancedb.md
 │   └── skill-distribution.md
 ├── hermit/
-│   ├── app.py                 # FastAPI app + lifespan
-│   ├── cli.py                 # CLI entry (JSON output)
-│   ├── config.py              # paths, defaults, env vars
-│   ├── models.py              # model download + verification
+│   ├── app.py                 # FastAPI 应用 + lifespan
+│   ├── cli.py                 # CLI 入口（JSON 输出）
+│   ├── config.py              # 路径、默认值、环境变量
+│   ├── models.py              # 模型下载与校验
 │   ├── api/
 │   │   ├── routes.py
 │   │   └── schemas.py
 │   ├── ingestion/
-│   │   ├── chunker.py         # markdown / token chunking
+│   │   ├── chunker.py         # markdown / token 切片
 │   │   ├── scanner.py
 │   │   ├── task_queue.py
 │   │   └── watcher.py
 │   ├── retrieval/
 │   │   ├── embedder.py
-│   │   ├── embed_cache.py     # diskcache-backed dense embedding cache
+│   │   ├── embed_cache.py     # diskcache 落地的 per-model 向量缓存
 │   │   ├── reranker.py
 │   │   └── searcher.py
 │   └── storage/
-│       ├── lance.py           # LanceDB-backed vector store
-│       ├── metadata.py        # SQLite per-collection
+│       ├── lance.py           # LanceDB 向量存储
+│       ├── metadata.py        # 每 collection 一个 SQLite
 │       ├── model_signature.py
-│       ├── quantizer.py       # INT8 quantization for dense embedder
+│       ├── quantizer.py       # dense embedder 的 INT8 量化
 │       └── registry.py
 └── tests/
 
-~/.hermit/                     # runtime data (override with HERMIT_HOME)
-├── models/                    # ONNX weights (fastembed cache)
-├── cache/dense/               # dense embedding cache (sha256-keyed, 30-day TTL)
+~/.hermit/                     # 运行时数据（可用 HERMIT_HOME 覆盖）
+├── models/                    # ONNX 权重（fastembed cache）
+├── cache/dense/               # dense 嵌入向量缓存（sha256 key，TTL 7 天）
 ├── data/
-│   ├── lance/                 # LanceDB tables (one per collection)
-│   ├── metadata/              # SQLite per-collection
-│   ├── collections.json       # registry
+│   ├── lance/                 # LanceDB 表（每个 collection 一张）
+│   ├── metadata/              # 每 collection 一个 SQLite
+│   ├── collections.json       # 注册表
 │   └── model_signature.json
 ├── logs/hermit.log
 └── hermit.pid
 ```
 
-## Installation
+## 安装
 
-### Requirements
+### 环境要求
 
 - Python `3.12 ~ 3.13`
-- macOS or Linux
+- macOS 或 Linux
+- `uv`
 
-### Install as a CLI tool (recommended)
+### 安装 CLI 与 Skill（推荐）
 
-```bash
-uv tool install git+https://github.com/xxxgqcoder/hermit.git
-```
-
-This drops a `hermit` executable into `~/.local/bin/` with its own isolated environment — no venv to activate. To upgrade later: `uv tool install git+https://github.com/xxxgqcoder/hermit.git --force` (or `uv tool upgrade hermit`).
-
-After installing, deploy the bundled agent skill so Claude / other agents can discover Hermit automatically:
+从其他工作区安装 GitHub 仓库版本：
 
 ```bash
+uv tool install git+https://github.com/xxxgqcoder/hermit.git --force
 hermit install-skills
 ```
 
-### Development install (from source)
+安装当前 checkout：
 
 ```bash
-git clone https://github.com/xxxgqcoder/hermit.git
-cd hermit
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
+uv tool install . --force
+hermit install-skills
 ```
 
-If you plan to use `hermit download`, make sure `huggingface_hub` is available in your environment, since the CLI uses it to download model snapshots.
+安装后验证：
 
-## Quick start
+```bash
+command -v hermit
+test -f ~/.agents/skills/hermit-search/SKILL.md
+```
 
-### 1. Download models (optional but recommended)
+Agent 在本仓库中执行安装、PATH 修复和版本核验时，遵循 [AGENTS.md](AGENTS.md#cli-与-skill-安装)。
+
+如果你打算使用 `hermit download`，请确认环境中可用 `huggingface_hub`，因为该命令依赖它下载模型快照。
+
+## 快速开始
+
+### 1. 下载模型（可选但推荐）
 
 ```bash
 hermit download
 ```
 
-Optional flags:
+可选参数：
 
 ```bash
 hermit download --force
 hermit download --skip-verify
 ```
 
-Notes:
+说明：
 
-- missing models can also be downloaded automatically on first service startup
-- downloading them explicitly makes first boot less surprising and easier to monitor
+- 首次启动服务时，若模型缺失，也会自动下载
+- 提前下载可以让首次启动更可控，避免启动过程“边开机边搬家”
 
-### 2. Register a knowledge-base folder
+### 2. 注册知识库目录
 
 ```bash
 hermit kb add my_docs ./documents
 ```
 
-Optional flags:
+可选参数：
 
 ```bash
 hermit kb add my_docs ./documents \
@@ -234,77 +230,77 @@ hermit kb add my_docs ./documents \
   --ignore-ext .pdf --ignore-ext .png
 ```
 
-List collections:
+查看 collection 列表：
 
 ```bash
 hermit kb list
 ```
 
-Update ignore rules:
+更新忽略规则：
 
 ```bash
 hermit kb update my_docs --ignore "dist/**" --ignore-ext .log
 hermit kb update my_docs --clear-ignore --clear-ignore-ext
 ```
 
-Remove a collection:
+删除 collection：
 
 ```bash
 hermit kb remove my_docs
 ```
 
-Collection naming rules:
+collection 名称规则：
 
-- must start with a letter or digit
-- may contain only letters, digits, underscores, and hyphens
-- must be unique
+- 必须以字母或数字开头
+- 只能包含字母、数字、下划线和连字符
+- 名称必须唯一
 
-### 3. Start the service
+### 3. 启动服务
 
 ```bash
 hermit start
 ```
 
-On startup, Hermit will:
+启动时，Hermit 会：
 
-- warm up embedding and reranker models
-- start the background indexing worker
-- restore persisted collections from `~/.hermit/data/collections.json`
-- scan each collection folder
-- start watching registered folders for changes
+- 预热 embedding 和 reranker 模型
+- 启动后台索引 worker
+- 从 `~/.hermit/data/collections.json` 恢复已持久化的 collection
+- 扫描每个 collection 目录
+- 启动目录监听
 
-Default bind address:
+默认监听地址：
 
 - Host: `0.0.0.0`
 - Port: `8000`
 
-Other server commands:
+其他服务命令：
 
 ```bash
-hermit status     # health JSON (mode, collections, pending tasks, ...)
-hermit logs       # tail the server log
-hermit stop       # graceful shutdown
+hermit status     # 健康 JSON（模式、collection、待索引任务等）
+hermit logs       # 流式查看服务日志
+hermit stop       # 优雅停服
 ```
 
-### 4. Search
+### 4. 搜索
 
-CLI (recommended — JSON output, no curl glue needed):
+推荐用 CLI（JSON 输出，免去 curl 拼装）：
 
 ```bash
-hermit search my_docs "two sum approach"
-hermit search my_docs "lancedb" --mode keyword          # FTS only, faster
-hermit search my_docs "binary"  --mode fuzzy            # substring scan
-hermit search my_docs "design"  --mode fuzzy --filename "*.md"
+hermit search my_docs "two sum 的思路"
+hermit search my_docs "lancedb" --mode keyword          # FTS only，更快
+hermit search my_docs "二分"   --mode fuzzy             # 子串扫描
+hermit search my_docs "design" --mode fuzzy --filename "*.md"
 hermit search my_docs "embedding" --no-rerank --top-k 3
 ```
 
-HTTP equivalent:
+HTTP 等价调用：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/search \
 	-H 'Content-Type: application/json' \
 	-d '{
-		"query": "two sum approach",
+		"query": "two sum 的思路",
 		"collection": "my_docs",
 		"top_k": 5,
 		"rerank_candidates": 20,
@@ -312,99 +308,99 @@ curl -X POST http://127.0.0.1:8000/search \
 	}'
 ```
 
-Supported `mode` values: `hybrid` (default), `semantic`, `keyword`, `fuzzy`.
+`mode` 取值：`hybrid`（默认）、`semantic`、`keyword`、`fuzzy`。
 
 ## CLI
 
-All commands output JSON to stdout. Add `--pretty` for indented output. Errors are reported as `{"error": "message"}` with non-zero exit code.
+所有命令默认输出 JSON 到 stdout。加 `--pretty` 可得到缩进格式。错误以 `{"error": "message"}` 形式输出，退出码非零。
 
-### Server lifecycle
+### 服务生命周期
 
-| Command | Purpose |
+| 命令 | 用途 |
 |---|---|
-| `hermit start` | Start the server in background (uvicorn daemon). |
-| `hermit stop` | Graceful shutdown (SIGTERM, falls back to SIGKILL after 10s). |
-| `hermit status` | Health JSON: mode, uptime, collections, pending tasks. |
-| `hermit logs` | Tail `~/.hermit/logs/hermit.log` (streaming, not JSON). |
+| `hermit start` | 后台启动服务（uvicorn daemon）。 |
+| `hermit stop` | 优雅停止（SIGTERM，10 秒后退化为 SIGKILL）。 |
+| `hermit status` | 健康 JSON：模式、uptime、collections、待处理任务等。 |
+| `hermit logs` | 流式查看 `~/.hermit/logs/hermit.log`（非 JSON）。 |
 
 ### `hermit download`
 
-Download all required models and optionally run a basic verification step.
+下载所有所需模型，并可选执行基础验证。
 
-Flags:
+参数：
 
-- `--force`: force re-download
-- `--skip-verify`: skip post-download verification
+- `--force`：强制重新下载
+- `--skip-verify`：跳过下载后的验证
 
 ### `hermit search <collection> [<query>]`
 
-Semantic / keyword / fuzzy search. JSON-formatted results.
+语义 / 关键词 / 模糊检索，JSON 输出。
 
-Flags:
+参数：
 
-- `--mode {hybrid,semantic,keyword,fuzzy}` — default `hybrid`
-- `--top-k N` — number of results (default 5)
-- `--rerank-candidates N` — recall pool before rerank (default 20)
-- `--filename PATTERN` — orthogonal filename filter (substring or glob)
-- `--rerank` / `--no-rerank` — override the mode's default rerank behavior
+- `--mode {hybrid,semantic,keyword,fuzzy}` — 默认 `hybrid`
+- `--top-k N` — 返回数量（默认 5）
+- `--rerank-candidates N` — 精排前的召回候选池大小（默认 20）
+- `--filename PATTERN` — 文件名过滤（子串或 glob），正交参数
+- `--rerank` / `--no-rerank` — 显式覆盖各模式默认的 rerank 行为
 
-In `fuzzy` mode the `query` is optional when `--filename` is supplied.
+`fuzzy` 模式下，当 `--filename` 给出时，`query` 可省略。
 
 ### `hermit kb add <name> <dir>`
 
-Register a folder as a collection.
+将目录注册为 collection。
 
-Flags:
+参数：
 
-- `--ignore PATTERN` — glob path to ignore (repeatable)
-- `--ignore-ext EXT` — file extension to ignore, e.g. `.pdf` (repeatable)
+- `--ignore PATTERN` — glob 形式路径忽略（可重复）
+- `--ignore-ext EXT` — 后缀忽略，例如 `.pdf`（可重复）
 
 ### `hermit kb update <name>`
 
-Replace ignore rules for an existing collection (not additive).
+替换某个 collection 的忽略规则（替换语义，非追加）。
 
-Flags:
+参数：
 
-- `--ignore PATTERN` — new path-ignore list (replaces previous)
-- `--ignore-ext EXT` — new ext-ignore list (replaces previous)
-- `--clear-ignore` — drop all path ignore patterns
-- `--clear-ignore-ext` — drop all extension ignore patterns
+- `--ignore PATTERN` — 新的路径忽略列表（替换已有配置）
+- `--ignore-ext EXT` — 新的后缀忽略列表（替换已有配置）
+- `--clear-ignore` — 清空所有路径忽略模式
+- `--clear-ignore-ext` — 清空所有后缀忽略规则
 
 ### `hermit kb remove <name>`
 
-Remove a collection and delete its metadata store.
+删除 collection 及其元数据。
 
 ### `hermit kb list`
 
-List all registered collections.
+列出所有已注册 collection。
 
 ### `hermit collection <subcommand> <name>`
 
-Query live collection state from a running server (requires `hermit start`).
+查询正在运行的服务的实时 collection 状态（需要 `hermit start` 已经启动）。
 
-- `hermit collection status <name>` — indexing status (`indexed_files`, `total_chunks`, `watching`)
-- `hermit collection sync <name>` — trigger a manual rescan
-- `hermit collection tasks <name>` — background task queue status
+- `hermit collection status <name>` — 索引状态（`indexed_files` / `total_chunks` / `watching`）
+- `hermit collection sync <name>` — 手动触发同步扫描
+- `hermit collection tasks <name>` — 后台任务队列状态
 
 ### `hermit install-skills`
 
-Install bundled agent skill specs to `~/.agents/skills/`.
+将内置的 agent skill 安装到 `~/.agents/skills/`。
 
-- `--uninstall` removes previously installed skills
+- `--uninstall` 反向卸载已安装的 skill
 
 ## HTTP API
 
-The current codebase exposes the following endpoints.
+当前代码实现了以下接口。
 
 ### `POST /search`
 
-Run hybrid / semantic / keyword / fuzzy search.
+执行混合 / 语义 / 关键词 / 模糊检索。
 
-Request example:
+请求示例：
 
 ```json
 {
-	"query": "sliding window maximum",
+	"query": "滑动窗口最大值",
 	"collection": "my_docs",
 	"top_k": 5,
 	"rerank_candidates": 20,
@@ -414,9 +410,9 @@ Request example:
 }
 ```
 
-`mode`: `hybrid` (default), `semantic`, `keyword`, `fuzzy`. `filename` accepts a substring or glob (e.g. `*.md`). `rerank` overrides the mode's default cross-encoder behavior (`null` keeps the default; `false` skips rerank; `true` forces it).
+`mode`：`hybrid`（默认） / `semantic` / `keyword` / `fuzzy`。`filename` 支持子串或 glob（例如 `*.md`）。`rerank` 用来覆盖该模式的默认 rerank 行为（`null` 走模式默认；`false` 跳过；`true` 强制开启）。
 
-Response example:
+返回示例：
 
 ```json
 {
@@ -434,9 +430,9 @@ Response example:
 
 ### `POST /collections`
 
-Register a new collection. The server scans the folder asynchronously and persists the entry to the registry; subsequent restarts auto-restore it.
+注册一个新的 collection。服务端异步扫描该目录并持久化到注册表，重启后自动恢复。
 
-Request:
+请求：
 
 ```json
 {
@@ -447,106 +443,89 @@ Request:
 }
 ```
 
-Returns `409` if the name already exists, `400` for invalid name or folder path.
+冲突时返回 `409`，非法名称 / 路径返回 `400`。
 
 ### `DELETE /collections/{name}`
 
-Remove a collection: stop the watcher, drain its task queue, drop the LanceDB table, delete the SQLite metadata DB, and unregister.
+删除 collection：停掉文件监听 → 等后台索引队列清空 → 删 LanceDB 表 → 删 SQLite 元数据 → 从注册表移除。
 
-Returns `409` if background indexing tasks for that collection cannot drain within 30s — retry shortly.
+若 30 秒内后台索引任务无法清空，返回 `409`，稍后重试。
 
 ### `POST /collections/{name}/sync`
 
-Trigger a manual scan/sync for an existing collection. Response: `{ "added": N, "updated": M, "deleted": K }`.
+手动触发某个 collection 的扫描同步。返回 `{ "added": N, "updated": M, "deleted": K }`。
 
 ### `GET /collections/{name}/status`
 
-Returns `{ name, folder_path, indexed_files, total_chunks, watching }`.
+返回 `{ name, folder_path, indexed_files, total_chunks, watching }`。
 
 ### `GET /collections/{name}/tasks`
 
-Returns `{ collection, pending_tasks, queued_tasks, in_progress_tasks, worker_alive }`.
+返回 `{ collection, pending_tasks, queued_tasks, in_progress_tasks, worker_alive }`。
 
 ### `GET /health`
 
-Server health and runtime info.
+服务健康状态与运行信息。
 
-Response fields:
+返回字段：
 
-- `status` — `"ready"` or `"starting"`
-- `uptime` — seconds since server start
-- `models_loaded` — whether embedding/reranker models are loaded
-- `collections` — list of `{name, indexed_files, total_chunks}` per collection
-- `pending_index_tasks` — total background indexing tasks waiting across all collections
-- `storage` — always `"lance"` (LanceDB-backed embedded store)
+- `status` — `"ready"` 或 `"starting"`
+- `uptime` — 服务启动后经过的秒数
+- `models_loaded` — 模型是否已加载完成
+- `collections` — 各 collection 的 `{name, indexed_files, total_chunks}`
+- `pending_index_tasks` — 全部 collection 待处理的后台索引任务总数
+- `storage` — 固定为 `"lance"`（LanceDB 嵌入式存储）
 
-## Storage layout
+## 数据存储
 
-Hermit keeps all runtime data under `~/.hermit/` by default (override with `HERMIT_HOME` env var):
+Hermit 默认把所有运行时数据存到 `~/.hermit/`（可用 `HERMIT_HOME` 环境变量覆盖）：
 
-- `~/.hermit/models/`: local model cache (fastembed ONNX weights)
-- `~/.hermit/data/lance/`: LanceDB tables — one per collection
-- `~/.hermit/data/metadata/`: one SQLite database per collection
-- `~/.hermit/data/collections.json`: persisted collection configuration
-- `~/.hermit/cache/dense/`: dense embedding cache (sha256-keyed, 30-day TTL)
-- `~/.hermit/logs/hermit.log`: server log
-- `~/.hermit/hermit.pid` and `~/.hermit/port.json`: daemon bookkeeping
+- `~/.hermit/models/`: 本地模型缓存（fastembed ONNX 权重）
+- `~/.hermit/data/lance/`: LanceDB 表，每个 collection 一张
+- `~/.hermit/data/metadata/`: 每个 collection 一个 SQLite 数据库
+- `~/.hermit/data/collections.json`: collection 持久化配置
+- `~/.hermit/cache/dense/`: dense 嵌入向量缓存（sha256 keyed，TTL 7 天）
+- `~/.hermit/logs/hermit.log`: 服务日志
+- `~/.hermit/hermit.pid` 和 `~/.hermit/port.json`: daemon 状态文件
 
-Single directory makes Hermit easy to back up, move, and clean up.
+集中在单一目录，便于备份、迁移和清理。
 
-## Indexing behavior
+## 索引行为
 
-### File handling
+### 文件处理规则
 
-- recursively scans all non-hidden files
-- skips any path segment starting with `.`
-- reads files as text with `utf-8` and `errors="replace"`
+- 递归扫描所有非隐藏文件
+- 跳过任一路径片段以 `.` 开头的文件或目录
+- 按文本读取，使用 `utf-8` 和 `errors="replace"`
 
-### Change detection
+### 变更检测
 
-Hermit tracks indexed files in SQLite and uses **SHA256** to detect content changes.
+Hermit 通过 SQLite 跟踪已索引文件，并使用 **SHA256** 检测内容变化。
 
-During scanning it handles:
+扫描时会处理：
 
-- **new files**: enqueue or index them
-- **modified files**: rechunk, re-embed, and replace old chunks
-- **deleted files**: remove them from LanceDB and SQLite
+- **新增文件**：入队或直接索引
+- **修改文件**：重新切块、重建向量并替换旧数据
+- **删除文件**：从 LanceDB 和 SQLite 中移除
 
-### Chunking rules
+### 分块规则
 
-- default chunk size is `256` tokens (using the embedding model's tokenizer)
-- adjacent chunks overlap by `32` tokens
-- empty text is skipped
-- short text stays as a single chunk
+- 默认 chunk 大小为 `256` tokens（使用 embedding 模型自带的 tokenizer 计数）
+- 相邻 chunk 重叠 `32` tokens
+- 空白文本会被跳过
+- 短文本保持单 chunk
 
-## Known limitations
+## 已知限制
 
-- Hybrid fusion uses LanceDB's built-in RRF reranker; explicit `w_dense`/`w_sparse` knobs are no longer exposed
-- all files are treated as text; PDF, image, and Office parsing are out of scope
-- the maximum number of collections is currently `4`
-- first-time model downloads may take a while and use noticeable disk space
+- 混合检索使用 LanceDB 内置的 RRF 融合，不再暴露 `w_dense`/`w_sparse` 显式权重
+- 所有文件均按文本处理；PDF、图片和 Office 文档解析不在当前范围内
+- collection 数量上限目前是 `4`
+- 首次模型下载可能较慢，并会占用一定磁盘空间
 
-## Development and testing
+## 开发说明
 
-The test suite currently covers:
+面向开发 Agent 的环境、测试、安装验证和提交前检查见 [AGENTS.md](AGENTS.md)；实现细节见 [`docs/design.md`](docs/design.md)。
 
-- CLI validation and collection management
-- scanner add/update/delete logic
-- task queue status reporting
-- selected API route behavior
+## 一句话总结
 
-Run tests with:
-
-```bash
-pytest
-```
-
-## Design notes
-
-For implementation details, see:
-
-- `docs/design.md`
-
-## In one sentence
-
-If you want a small, local-first, multi-collection semantic search service that quietly gets the job done, Hermit fits the brief nicely.
+如果你需要一个小巧、纯本地、支持多 collection 的语义检索服务，Hermit 是个安静但靠谱的工具选手。
