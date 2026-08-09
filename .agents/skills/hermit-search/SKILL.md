@@ -1,6 +1,6 @@
 ---
 name: hermit-search
-description: 'Local search over knowledge base collections powered by Hermit. Supports four search modes (hybrid, semantic, keyword, fuzzy) and orthogonal filename filtering. Use when: searching knowledge base, semantic / keyword / fuzzy search, querying documents, managing collections, adding knowledge base, indexing files.'
+description: 'Install, set up, upgrade, configure, troubleshoot, and use Hermit for local knowledge-base search. Supports four search modes (hybrid, semantic, keyword, fuzzy), filename filtering, collection management, and file indexing. Use when: installing Hermit or the hermit-search skill, searching or querying local documents, managing collections, adding a knowledge base, or indexing files.'
 ---
 
 # Skill: hermit-search
@@ -32,13 +32,36 @@ Hermit 本地知识库检索服务使用指南。Hermit 提供四种搜索模式
 
 - Python 3.12 ~ 3.13
 
-### 安装
+### Agent 安装流程
+
+先根据当前上下文选择安装来源：
+
+- **Agent 正在 Hermit repo 内工作**：严格遵循根目录 `AGENTS.md` 的“CLI 与 Skill 安装”，安装并核验当前 checkout，不执行下面的远端安装命令。
+- **Agent 在其他工作区**：从 Hermit GitHub 仓库安装：
 
 ```sh
-uv tool install git+https://github.com/xxxgqcoder/hermit.git
-# 部署 Skill 到 ~/.agents/skills/hermit-search/（可选，使 Agent 自动发现）
+uv tool install git+https://github.com/xxxgqcoder/hermit.git --force
+```
+
+随后部署全局 Skill：
+
+```sh
 hermit install-skills
 ```
+
+- 在 Hermit repo 内，`.agents/skills/hermit-search/` 已可被当前项目上下文发现，全局部署可选。
+- 要让其他工作区发现 `hermit-search`，必须执行 `hermit install-skills`。
+
+安装后验证：
+
+```sh
+command -v hermit
+test -f ~/.agents/skills/hermit-search/SKILL.md
+```
+
+`hermit install-skills` 应返回包含 `"status": "installed"` 和 `"hermit-search"` 的 JSON。若当前 Agent 不会动态刷新 Skill 列表，告知用户新开任务或重启会话后再使用。
+
+仅安装 CLI 和 Skill 时，不要自动执行模型下载或启动服务；这两步只在用户准备实际检索或明确要求时执行。
 
 ### 模型下载
 
