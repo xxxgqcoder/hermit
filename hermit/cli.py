@@ -169,7 +169,7 @@ def _read_pid() -> int | None:
 # ── Server commands ─────────────────────────────────────────────
 
 
-def cmd_start(_args):
+def cmd_start(args):
     pid = _read_pid()
     if pid is not None:
         _output({"status": "already_running", "pid": pid, "port": load_port()})
@@ -211,6 +211,10 @@ def cmd_start(_args):
     # Override with HERMIT_START_TIMEOUT env var (seconds).
     start_timeout = int(os.environ.get("HERMIT_START_TIMEOUT", 300))
 
+    verbose = args.verbose
+    show_progress = verbose or sys.stderr.isatty()
+    if show_progress:
+        print("[hermit] starting...", file=sys.stderr, flush=True)
     last_output_t = time.monotonic()  # tracks when we last printed to stderr
 
     for elapsed in range(start_timeout):
@@ -219,14 +223,15 @@ def cmd_start(_args):
             PID_FILE.unlink(missing_ok=True)
             _error(f"server process exited unexpectedly, check {log_file}")
 
-        # ── Stream new server log lines to stderr ───────────────
-        log_pos, new_lines = _tail_log(log_file, log_pos)
-        for line in new_lines:
-            print(line, file=sys.stderr, flush=True)
-            last_output_t = time.monotonic()
+        # Logs stay in the file unless explicitly requested. Keep stdout JSON.
+        if verbose:
+            log_pos, new_lines = _tail_log(log_file, log_pos)
+            for line in new_lines:
+                print(line, file=sys.stderr, flush=True)
+                last_output_t = time.monotonic()
 
         # Heartbeat: if the log has been silent for >10s, reassure the user.
-        if time.monotonic() - last_output_t > 10:
+        if show_progress and time.monotonic() - last_output_t > 10:
             print(
                 f"[hermit] still starting... ({elapsed + 1}s elapsed)",
                 file=sys.stderr, flush=True,
@@ -243,10 +248,11 @@ def cmd_start(_args):
             continue
 
         if health.get("status") == "ready":
-            print(
-                f"[hermit] server ready ({elapsed + 1}s elapsed)",
-                file=sys.stderr, flush=True,
-            )
+            if show_progress:
+                print(
+                    f"[hermit] server ready ({elapsed + 1}s elapsed)",
+                    file=sys.stderr, flush=True,
+                )
             _output({"status": "started", "pid": proc.pid, "port": port})
 
     _output({"status": "starting", "pid": proc.pid, "port": port,
@@ -556,7 +562,11 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     # Server lifecycle
-    sub.add_parser("start", help="Start the server in background")
+    start_parser = sub.add_parser("start", help="Start the server in background")
+    start_parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Stream logs from this startup to stderr",
+    )
     sub.add_parser("stop", help="Stop the running server")
     sub.add_parser("status", help="Show server status")
     sub.add_parser("logs", help="Tail server logs (streaming, not JSON)")

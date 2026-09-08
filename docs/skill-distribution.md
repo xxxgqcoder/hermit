@@ -1,6 +1,6 @@
 # Hermit Skill 分发方式说明
 
-本文档梳理 `hermit` 仓库中 Skill 的**组织、打包、安装与使用**方式，便于统一维护与发布。
+本文档梳理 `hermit` 仓库中 Skill 的**组织、打包、安装与使用**方式，便于统一维护与发布；面向 Agent 的开发和安装约束统一放在根目录 [`AGENTS.md`](../AGENTS.md#cli-与-skill-安装)，用户安装方式保留在 `README.md`，本文件负责解释分发机制和维护规范。
 
 ## 1. 分发目标
 
@@ -59,14 +59,36 @@ build-backend = "hatchling.build"
 ".agents/skills/hermit-search" = "hermit/_skills/hermit-search"
 ```
 
-### 3.3 安装与部署阶段
+### 3.3 Agent 安装与部署阶段
 
-用户执行：
+Agent 应优先遵循根目录 [`AGENTS.md`](../AGENTS.md#cli-与-skill-安装) 的安装指引；下面保留与实现对应的完整命令，供维护和发布检查使用。
+
+Agent 先根据所在上下文选择安装来源，避免把远端版本与当前 checkout 混用：
+
+1. **正在 Hermit repo 内工作**：安装当前 checkout。
+2. **在其他工作区安装 Hermit**：从 GitHub 仓库安装。
 
 ```sh
-uv tool install hermit
+# 当前目录是 Hermit repo
+uv tool install . --force
+
+# 或：从其他工作区安装
+uv tool install git+https://github.com/xxxgqcoder/hermit.git --force
+
+# 部署到全局 Skill 目录
 hermit install-skills
 ```
+
+安装后必须验证 CLI 与 Skill 文件均可用：
+
+```sh
+command -v hermit
+test -f ~/.agents/skills/hermit-search/SKILL.md
+```
+
+`hermit install-skills` 应返回包含 `"status": "installed"` 和 `"hermit-search"` 的 JSON。若当前 Agent 不会动态刷新 Skill 列表，应告知用户新开任务或重启会话后再使用。
+
+安装 CLI 和 Skill 不等于初始化运行环境；除非用户准备实际检索或明确要求，否则 Agent 不应自动下载约 1.3 GB 模型或启动服务。
 
 CLI 逻辑（`hermit/cli.py` 中的 `_find_skills_dir` + `cmd_install_skills`）：
 
@@ -80,11 +102,11 @@ CLI 逻辑（`hermit/cli.py` 中的 `_find_skills_dir` + `cmd_install_skills`）
 
 ### 4.1 项目内直接使用
 
-在本仓库中，Agent 可直接读取 `.agents/skills/` 内文档执行对应流程。
+在本仓库中，Agent 可直接读取 `.agents/skills/` 内文档执行对应流程，无需为当前项目上下文重复部署全局 Skill。
 
 ### 4.2 全局复用
 
-安装到 `~/.agents/skills/{skill_name}/` 后，其他工作区中的 Agent 也可复用这些 Skill。
+要让其他工作区中的 Agent 复用 Skill，必须运行 `hermit install-skills` 将其安装到 `~/.agents/skills/{skill_name}/`。
 
 ## 5. 维护建议（发布检查清单）
 
@@ -96,6 +118,8 @@ CLI 逻辑（`hermit/cli.py` 中的 `_find_skills_dir` + `cmd_install_skills`）
 4. `hermit install-skills` 可返回成功 JSON，并正确复制到 `~/.agents/skills/{skill_name}/`。
 5. `hermit install-skills --uninstall` 可正确清理安装内容。
 6. `uv build` 后检查 wheel 内含 `hermit/_skills/<skill-name>/SKILL.md`。
+7. 从 repo 内安装时使用 `uv tool install . --force`，从其他工作区安装时使用 GitHub URL，不使用来源不明确的 `uv tool install hermit`。
+8. 新会话中确认 Agent 能发现 `hermit-search`，且安装意图可以命中其 frontmatter `description`。
 
 ## 6. 当前分发配置
 
@@ -109,5 +133,5 @@ CLI 逻辑（`hermit/cli.py` 中的 `_find_skills_dir` + `cmd_install_skills`）
 
 1. 在 `.agents/skills/<new-skill>/SKILL.md` 创建 Skill（含 YAML frontmatter）。
 2. 在 `pyproject.toml` 的 `force-include` 添加对应映射。
-3. 运行 `hermit install-skills` 验证安装。
+3. 运行 `uv tool install . --force && hermit install-skills` 验证当前 checkout 的安装。
 4. 运行 `uv build && unzip -l dist/*.whl | grep _skills` 验证打包。

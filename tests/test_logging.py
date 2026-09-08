@@ -1,8 +1,15 @@
 """Tests for bounded server logging."""
 
 import json
+import os
+import socket
 import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -98,6 +105,82 @@ def test_start_trims_log_before_spawning_server(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(cli.urllib.request, "urlopen", lambda *_args, **_kwargs: ReadyResponse())
 
     with pytest.raises(SystemExit) as exc_info:
-        cli.cmd_start(None)
+        cli.cmd_start(SimpleNamespace(verbose=False))
 
     assert exc_info.value.code == 0
+
+
+@pytest.mark.parametrize("fail_startup", [False, True])
+def test_server_runner_records_logs_and_rotates_without_console_noise(tmp_path, fail_startup):
+    """Exercise real Uvicorn and file handlers with a model-free ASGI app."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    script = '''
+import logging
+import sys
+import types
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from hermit import server
+
+fail_startup = sys.argv.pop() == "fail"
+
+@asynccontextmanager
+async def lifespan(app):
+    if fail_startup:
+        raise RuntimeError("startup failure sentinel")
+    for i in range(100):
+        logging.getLogger("hermit.probe").info("rotation sentinel %s", i)
+    yield
+
+module = types.ModuleType("hermit.app")
+module.app = FastAPI(lifespan=lifespan)
+@module.app.get("/health")
+def health():
+    logging.getLogger("hermit.probe").info("health sentinel")
+    return {"status": "ready"}
+sys.modules["hermit.app"] = module
+server.LOG_MAX_BYTES = 1024
+server.main()
+'''
+    env = {**os.environ, "HERMIT_HOME": str(tmp_path)}
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script, "--host", "127.0.0.1", "--port", str(port),
+         "fail" if fail_startup else "ready"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        if fail_startup:
+            out, err = proc.communicate(timeout=15)
+            assert proc.returncode != 0
+        else:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                assert proc.poll() is None, "server exited before ready"
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as resp:
+                        assert json.loads(resp.read())["status"] == "ready"
+                    break
+                except (urllib.error.URLError, TimeoutError):
+                    time.sleep(0.1)
+            else:
+                pytest.fail("probe server did not become ready")
+            proc.terminate()
+            out, err = proc.communicate(timeout=10)
+            assert proc.returncode in (0, -15)
+        assert out == b""
+        assert err == b""
+        logs = list((tmp_path / "logs").glob("hermit.log*"))
+        content = "\n".join(path.read_text() for path in logs)
+        if fail_startup:
+            assert "startup failure sentinel" in content
+        else:
+            assert {path.name for path in logs} == {"hermit.log", "hermit.log.1"}
+            assert all(path.stat().st_size <= 1024 for path in logs)
+            assert "health sentinel" in content
+            assert 'GET /health HTTP/1.1' in content
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate(timeout=10)
