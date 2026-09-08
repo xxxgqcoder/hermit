@@ -261,6 +261,8 @@ collection 名称规则：
 hermit start
 ```
 
+默认不向控制台打印服务日志：交互终端仅显示简短启动状态，重定向或脚本调用时仅输出结果 JSON。完整日志保存在 `~/.hermit/logs/hermit.log`（可通过 `HERMIT_HOME` 更改根目录）。需要排错时使用 `hermit start --verbose`（或 `-v`），仅显示本次启动新产生的日志；启动后使用 `hermit logs` 查看日志。启动失败会返回错误及日志路径，等待超时会返回 `starting` 和提示，不代表服务已就绪。
+
 启动时，Hermit 会：
 
 - 预热 embedding 和 reranker 模型
@@ -318,7 +320,7 @@ curl -X POST http://127.0.0.1:8000/search \
 
 | 命令 | 用途 |
 |---|---|
-| `hermit start` | 后台启动服务（uvicorn daemon）。 |
+| `hermit start [--verbose]` | 后台启动服务；默认简洁输出，`--verbose` / `-v` 显示本次启动日志。 |
 | `hermit stop` | 优雅停止（SIGTERM，10 秒后退化为 SIGKILL）。 |
 | `hermit status` | 健康 JSON：模式、uptime、collections、待处理任务等。 |
 | `hermit logs` | 流式查看 `~/.hermit/logs/hermit.log`（非 JSON）。 |

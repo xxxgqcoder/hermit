@@ -267,6 +267,8 @@ Collection naming rules:
 hermit start
 ```
 
+By default, server logs stay off the console: interactive terminals show brief startup status, while redirected or scripted calls output only the result JSON. Full logs remain in `~/.hermit/logs/hermit.log` (the root can be changed with `HERMIT_HOME`). For troubleshooting, use `hermit start --verbose` (or `-v`) to stream only new logs from this startup, or `hermit logs` afterward. Startup failures return an error and log path; a readiness timeout returns `starting` with a warning, which does not mean the service is ready.
+
 On startup, Hermit will:
 
 - warm up embedding and reranker models
@@ -324,7 +326,7 @@ All commands output JSON to stdout. Add `--pretty` for indented output. Errors a
 
 | Command | Purpose |
 |---|---|
-| `hermit start` | Start the server in background (uvicorn daemon). |
+| `hermit start [--verbose]` | Start the server in background with concise output; `--verbose` / `-v` streams this startup's logs. |
 | `hermit stop` | Graceful shutdown (SIGTERM, falls back to SIGKILL after 10s). |
 | `hermit status` | Health JSON: mode, uptime, collections, pending tasks. |
 | `hermit logs` | Tail `~/.hermit/logs/hermit.log` (streaming, not JSON). |
