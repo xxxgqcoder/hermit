@@ -63,6 +63,10 @@ def _tail_log(log_path, last_pos: int) -> tuple[int, list[str]]:
     Returns (new_byte_pos, list_of_new_lines).
     """
     try:
+        if log_path.stat().st_size < last_pos:
+            # The rotating handler replaced the active file. Read the new file
+            # from the beginning instead of seeking past its current end.
+            last_pos = 0
         with open(log_path, "rb") as f:
             f.seek(last_pos)
             data = f.read()
@@ -178,25 +182,27 @@ def cmd_start(args):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     log_file = LOG_DIR / "hermit.log"
+    # Normalize an oversized legacy log before recording the startup tail
+    # offset. Doing this in the parent avoids racing the child process and
+    # replaying the retained historical tail to stderr during startup.
+    from hermit.server import trim_log_file
+    trim_log_file(log_file)
+    log_pos = log_file.stat().st_size if log_file.exists() else 0
 
-    # Spawn uvicorn as a single-process daemon.
+    # Spawn the bounded-log Uvicorn runner as a single-process daemon.
     # Concurrency is handled by an internal ThreadPoolExecutor (search) and
     # daemon threads (indexing/watching), avoiding multi-process duplication.
-    with open(log_file, "a") as lf:
-        # Start before spawning so verbose mode includes early startup messages,
-        # but never replays logs from previous runs.
-        log_pos = lf.tell()
-        proc = subprocess.Popen(
-            [
-                sys.executable, "-m", "uvicorn",
-                "hermit.app:app",
-                "--host", HOST,
-                "--port", str(port),
-            ],
-            stdout=lf,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+    proc = subprocess.Popen(
+        [
+            sys.executable, "-m", "hermit.server",
+            "--host", HOST,
+            "--port", str(port),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(proc.pid))
@@ -307,7 +313,7 @@ def cmd_logs(_args):
         _error("no log file found")
 
     try:
-        subprocess.run(["tail", "-f", str(log_file)])
+        subprocess.run(["tail", "-F", str(log_file)])
     except KeyboardInterrupt:
         pass
 

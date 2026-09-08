@@ -233,6 +233,8 @@ hermit collection tasks <name>
 
 ### 7. 服务生命周期
 
+服务日志达到 256 MiB 时轮转，保留一个 `hermit.log.1` 备份；启动前会裁剪超大的旧日志，仅保留末尾完整行。`hermit logs` 会继续跟踪轮转后的文件。
+
 `hermit start` 默认不打印服务日志；交互终端仅显示简短启动状态，非交互调用仅输出结果 JSON。需要排错时可用 `hermit start --verbose`（`-v`）查看本次启动新增日志（stderr），历史日志不会重放。完整日志保存在 `$HERMIT_HOME/logs/hermit.log`（默认 `~/.hermit/logs/hermit.log`），也可用 `hermit logs` 查看。启动失败返回错误及日志路径；等待超时返回 `starting` 和 warning，不表示服务已就绪。
 
 ```sh

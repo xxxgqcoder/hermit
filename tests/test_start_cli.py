@@ -29,11 +29,12 @@ def startup(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMIT_START_TIMEOUT", "12")
 
     def spawn(*args, **kwargs):
-        assert kwargs["stderr"] == subprocess.STDOUT
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        assert kwargs["stdout"] == subprocess.DEVNULL
         assert kwargs["start_new_session"] is True
-        kwargs["stdout"].write("new startup 日志\n" * 1000)
-        kwargs["stdout"].write('127.0.0.1 - "GET /health HTTP/1.1" 200 OK\n')
-        kwargs["stdout"].flush()
+        with log_file.open("a") as log:
+            log.write("new startup 日志\n" * 1000)
+            log.write('127.0.0.1 - "GET /health HTTP/1.1" 200 OK\n')
         return proc
 
     def sleep(seconds):
@@ -75,6 +76,19 @@ def test_verbose_only_streams_current_startup(startup, capsys):
     assert "old startup" not in err
     assert err.count("new startup 日志") == 1000
     assert "GET /health" not in err
+
+
+def test_verbose_does_not_replay_trimmed_legacy_log(startup, monkeypatch, capsys):
+    import hermit.server as server
+
+    original_trim = server.trim_log_file
+    monkeypatch.setattr(server, "trim_log_file", lambda path: original_trim(path, 128))
+    with pytest.raises(SystemExit):
+        cli.cmd_start(SimpleNamespace(verbose=True))
+    out, err = capsys.readouterr()
+    assert json.loads(out)["status"] == "started"
+    assert "old startup" not in err
+    assert err.count("new startup 日志") == 1000
 
 
 @pytest.mark.parametrize("tty", [False, True])
